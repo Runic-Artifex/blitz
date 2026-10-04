@@ -1659,6 +1659,28 @@ impl BaseDocument {
         }
     }
 
+    /// Set whether the focused element matches `:focus-visible` (its
+    /// `FOCUSRING` state). Focusing sets it; an embedder that tracks input
+    /// modality (keyboard or pointer, as browsers' focus-visible heuristics
+    /// do) corrects it after each focus change or keyboard event.
+    pub fn set_focus_visible(&mut self, visible: bool) {
+        let Some(id) = self.focus_node_id else {
+            return;
+        };
+        let current = self.nodes[id]
+            .element_data()
+            .is_some_and(|data| data.element_state.contains(ElementState::FOCUSRING));
+        if current == visible {
+            return;
+        }
+        self.snapshot_node_and(id, ElementState::FOCUSRING, |node| {
+            if let Some(data) = node.element_data_mut() {
+                data.element_state.set(ElementState::FOCUSRING, visible);
+            }
+            node.mark_ancestors_dirty();
+        });
+    }
+
     pub fn set_mousedown_node_id(&mut self, node_id: Option<NodeId>) {
         self.mousedown_node_id = node_id.and_then(|id| self.nearest_non_anonymous_ancestor(id));
     }
