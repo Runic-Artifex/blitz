@@ -330,6 +330,10 @@ fn resolve_color_stops<T>(
     item_resolver: impl Fn(CSSPixelLength, &T) -> Option<f32>,
 ) -> (f32, f32) {
     let mut hint: Option<f32> = None;
+    // The largest position of any color stop or hint so far: a position below
+    // it is raised to it (CSS Images 3, color stop fixup), so stops reach the
+    // renderer sorted.
+    let mut max_offset = f32::NEG_INFINITY;
 
     for (idx, item) in items.iter().enumerate() {
         let (color, offset) = match item {
@@ -352,10 +356,15 @@ fn resolve_color_stops<T>(
                 }
             }
             GenericGradientItem::InterpolationHint(position) => {
-                hint = item_resolver(gradient_length, position);
+                hint = item_resolver(gradient_length, position).map(|h| h.max(max_offset));
+                if let Some(h) = hint {
+                    max_offset = h;
+                }
                 continue;
             }
         };
+        let offset = offset.max(max_offset);
+        max_offset = offset;
 
         if idx == 0 && !repeating && offset != 0.0 {
             gradient
