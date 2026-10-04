@@ -1655,7 +1655,26 @@ impl BaseDocument {
             self.snapshot_node_and(id, ElementState::FOCUS | ElementState::FOCUSRING, |node| {
                 node.blur(shell_provider)
             });
+            self.set_focus_within(id, false);
             self.focus_node_id = None;
+        }
+    }
+
+    /// Set or clear `FOCUS_WITHIN` (`:focus-within`) on `node_id` and its
+    /// ancestors.
+    fn set_focus_within(&mut self, node_id: NodeId, on: bool) {
+        let mut next = Some(node_id);
+        while let Some(id) = next {
+            next = self.nodes.get(id).and_then(|node| node.parent);
+            if !self.nodes.get(id).is_some_and(|node| node.is_element()) {
+                continue;
+            }
+            self.snapshot_node_and(id, ElementState::FOCUS_WITHIN, |node| {
+                if let Some(data) = node.element_data_mut() {
+                    data.element_state.set(ElementState::FOCUS_WITHIN, on);
+                }
+                node.mark_ancestors_dirty();
+            });
         }
     }
 
@@ -1702,6 +1721,7 @@ impl BaseDocument {
             self.snapshot_node_and(id, ElementState::FOCUS | ElementState::FOCUSRING, |node| {
                 node.blur(shell_provider.clone())
             });
+            self.set_focus_within(id, false);
         }
 
         // Focus the new node
@@ -1711,6 +1731,7 @@ impl BaseDocument {
             |node| node.focus(shell_provider),
         );
 
+        self.set_focus_within(focus_node_id, true);
         self.focus_node_id = Some(focus_node_id);
 
         true
