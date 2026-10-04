@@ -553,9 +553,46 @@ fn flush_line_decorations(
     }
 }
 
+/// Truncation of one line for `text-overflow: ellipsis`.
+struct Ellipsis {
+    font: parley::FontData,
+    font_size: f32,
+    coords: Vec<i16>,
+    baseline: f32,
+    glyph: u32,
+    advance: f32,
+    /// Glyphs ending after this x are not drawn.
+    cutoff: f32,
+    /// Where the ellipsis is drawn: after the last glyph that fits whole.
+    visible_end: f32,
+}
+
+/// An ellipsis (U+2026) in `font`: its glyph id and advance.
+fn ellipsis_glyph(font: &parley::FontData, font_size: f32, coords: &[i16]) -> Option<(u32, f32)> {
+    use skrifa::MetadataProvider as _;
+    let font_ref = skrifa::FontRef::from_index(font.data.as_ref(), font.index).ok()?;
+    let glyph = font_ref.charmap().map('\u{2026}')?;
+    let coords: Vec<skrifa::instance::NormalizedCoord> = coords
+        .iter()
+        .map(|&c| skrifa::instance::NormalizedCoord::from_bits(c))
+        .collect();
+    let advance = font_ref
+        .glyph_metrics(
+            skrifa::instance::Size::new(font_size),
+            skrifa::instance::LocationRef::new(&coords),
+        )
+        .advance_width(glyph)?;
+    Some((glyph.to_u32(), advance))
+}
+
 /// `color_override` replaces the colour a run would otherwise resolve from its
 /// ancestor stack. It exists for text styled by a pseudo-element rather than by
 /// its originating element, such as `::placeholder`.
+///
+/// `ellipsis_edge` (`text-overflow: ellipsis` on a box that clips its
+/// overflow) is the end edge of the line boxes in layout coordinates: a line
+/// that overflows it shows the glyphs that fit before an ellipsis, then the
+/// ellipsis in the line's font and the inline root's colour.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stroke_text<'a>(
     scene: &mut impl PaintScene,
@@ -566,6 +603,7 @@ pub(crate) fn stroke_text<'a>(
     inline_root_id: NodeId,
     context: &mut DrawTextContext,
     color_override: Option<Color>,
+    ellipsis_edge: Option<f32>,
 ) {
     let DrawTextContext {
         stack,
@@ -590,6 +628,50 @@ pub(crate) fn stroke_text<'a>(
         // draws one decoration per box rather than one stepped segment per differently-sized
         // run. Clearing preserves the allocation for the next line and inline context.
         deco_boxes.clear();
+
+        // Truncation for `text-overflow: ellipsis`: the ellipsis glyph (from the
+        // line's first run) and the x up to which glyphs are drawn.
+        let mut ellipsis = None;
+        if let Some(edge) = ellipsis_edge {
+            let runs = || {
+                line.items().filter_map(|item| match item {
+                    PositionedLayoutItem::GlyphRun(run) => Some(run),
+                    _ => None,
+                })
+            };
+            let line_end = runs()
+                .map(|run| run.offset() + run.advance())
+                .fold(0.0f32, f32::max);
+            if line_end > edge + 0.01 {
+                if let Some(first) = runs().next() {
+                    let run = first.run();
+                    let coords: &[i16] = bytemuck::cast_slice(run.normalized_coords());
+                    if let Some((glyph, advance)) =
+                        ellipsis_glyph(&run.font().font, run.font_size(), coords)
+                    {
+                        let cutoff = edge - advance;
+                        let mut visible_end = 0.0f32;
+                        for glyph_run in runs() {
+                            for g in glyph_run.positioned_glyphs() {
+                                if g.x + g.advance <= cutoff + 0.01 {
+                                    visible_end = visible_end.max(g.x + g.advance);
+                                }
+                            }
+                        }
+                        ellipsis = Some(Ellipsis {
+                            font: run.font().font.clone(),
+                            font_size: run.font_size(),
+                            coords: coords.to_vec(),
+                            baseline: first.baseline(),
+                            glyph,
+                            advance,
+                            cutoff,
+                            visible_end,
+                        });
+                    }
+                }
+            }
+        }
 
         for item in line.items() {
             if let PositionedLayoutItem::GlyphRun(glyph_run) = item {
@@ -653,11 +735,18 @@ pub(crate) fn stroke_text<'a>(
                     1.0, // alpha
                     transform,
                     glyph_xform,
-                    glyph_run.positioned_glyphs().map(|glyph| anyrender::Glyph {
-                        id: glyph.id as _,
-                        x: glyph.x,
-                        y: glyph.y,
-                    }),
+                    glyph_run
+                        .positioned_glyphs()
+                        .filter(|glyph| {
+                            ellipsis
+                                .as_ref()
+                                .is_none_or(|e| glyph.x + glyph.advance <= e.cutoff + 0.01)
+                        })
+                        .map(|glyph| anyrender::Glyph {
+                            id: glyph.id as _,
+                            x: glyph.x,
+                            y: glyph.y,
+                        }),
                 );
 
                 // Accumulate this run's contribution to each decorating box on its ancestor
@@ -677,7 +766,10 @@ pub(crate) fn stroke_text<'a>(
                 };
                 let run_node_id = style.brush.id;
                 let run_x0 = glyph_run.offset() as f64;
-                let run_x1 = run_x0 + glyph_run.advance() as f64;
+                let mut run_x1 = run_x0 + glyph_run.advance() as f64;
+                if let Some(e) = &ellipsis {
+                    run_x1 = run_x1.min((e.visible_end + e.advance) as f64);
+                }
 
                 for entry in stack.iter() {
                     if entry.decoration.is_none() {
@@ -710,6 +802,28 @@ pub(crate) fn stroke_text<'a>(
                     }
                 }
             }
+        }
+
+        if let Some(e) = &ellipsis {
+            let root_color = color_override
+                .unwrap_or_else(|| stack.first().map(|e| e.text_color).unwrap_or(Color::BLACK));
+            scene.draw_glyphs(
+                &e.font,
+                e.font_size,
+                !FONT_EMBOLDEN_ENABLED,
+                &e.coords,
+                kurbo::Vec2::default(),
+                Fill::NonZero,
+                &anyrender::Paint::from(root_color),
+                1.0,
+                transform,
+                None,
+                std::iter::once(anyrender::Glyph {
+                    id: e.glyph,
+                    x: e.visible_end,
+                    y: e.baseline,
+                }),
+            );
         }
 
         flush_line_decorations(

@@ -841,6 +841,15 @@ impl ElementCx<'_, '_> {
                 );
             }
 
+            // `text-overflow: ellipsis` applies to the line boxes of a box that
+            // clips its overflow; their end edge is the content box's.
+            let ellipsis_edge = (self.node.clips_overflow()
+                && matches!(
+                    self.style.clone_text_overflow().second,
+                    style::values::specified::text::TextOverflowSide::Ellipsis
+                ))
+            .then(|| (self.node.final_layout().content_box_width() as f64 * self.scale) as f32);
+
             // Render text
             let mut draw_text_context = self.context.draw_text_context.borrow_mut();
             crate::text::stroke_text(
@@ -852,6 +861,7 @@ impl ElementCx<'_, '_> {
                 self.node.id,
                 &mut draw_text_context,
                 None,
+                ellipsis_edge,
             );
         }
     }
@@ -920,6 +930,7 @@ impl ElementCx<'_, '_> {
                     self.node.id,
                     &mut draw_text_context,
                     Some(placeholder.color),
+                    None,
                 ),
                 _ => crate::text::stroke_text(
                     scene,
@@ -929,6 +940,7 @@ impl ElementCx<'_, '_> {
                     self.scale,
                     self.node.id,
                     &mut draw_text_context,
+                    None,
                     None,
                 ),
             }
@@ -985,6 +997,7 @@ impl ElementCx<'_, '_> {
                 self.scale,
                 self.node.id,
                 &mut draw_text_context,
+                None,
                 None,
             );
         }
