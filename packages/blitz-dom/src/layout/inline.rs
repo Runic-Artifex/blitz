@@ -536,8 +536,8 @@ impl BaseDocument {
                     AvailableSpace::Definite(limit) => (limit * scale)
                         .min(max_content_width + float_width)
                         .max(min_content_width),
-                }
-                .ceil();
+                };
+                let computed_width = ceil_layout_unit(computed_width, scale);
 
                 let style_width = node_size.width.map(|w| w * scale);
                 let min_width = node_min_size.width.map(|w| w * scale);
@@ -578,7 +578,7 @@ impl BaseDocument {
                 .inline_layout_data = Some(inline_layout);
 
             let measured_size = inputs.known_dimensions.unwrap_or(taffy::Size {
-                width: width.ceil() / scale,
+                width: ceil_layout_unit(width, scale) / scale,
                 // Height is ignored if RequestedAxis if Horizontal
                 height: 0.0,
             });
@@ -1043,4 +1043,11 @@ impl BaseDocument {
 #[inline(always)]
 fn f32_max(a: f32, b: f32) -> f32 {
     a.max(b)
+}
+
+/// Round a width in device pixels up to the next layout unit (1/64 CSS px,
+/// Blink's `LayoutUnit::FromFloatCeil`), so that a later layout at the computed
+/// width does not wrap the text again through float error.
+fn ceil_layout_unit(width: f32, scale: f32) -> f32 {
+    (width / scale * 64.0).ceil() / 64.0 * scale
 }
