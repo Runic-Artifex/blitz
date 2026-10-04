@@ -447,16 +447,26 @@ pub(crate) fn fetch_font_face_rules<'a>(
                 .find_map(|url_source| {
                     let mut format = match &url_source.format_hint {
                         Some(FontFaceSourceFormat::Keyword(fmt)) => *fmt,
+                        // Strings, including the legacy `*-variations` forms that
+                        // browsers still accept for variable fonts.
                         Some(FontFaceSourceFormat::String(str)) => match str.as_str() {
-                            "woff2" => FontFaceSourceFormatKeyword::Woff2,
-                            "ttf" => FontFaceSourceFormatKeyword::Truetype,
-                            "otf" => FontFaceSourceFormatKeyword::Opentype,
+                            "woff2" | "woff2-variations" => FontFaceSourceFormatKeyword::Woff2,
+                            "woff" | "woff-variations" => FontFaceSourceFormatKeyword::Woff,
+                            "ttf" | "truetype" | "truetype-variations" => {
+                                FontFaceSourceFormatKeyword::Truetype
+                            }
+                            "otf" | "opentype" | "opentype-variations" => {
+                                FontFaceSourceFormatKeyword::Opentype
+                            }
                             _ => FontFaceSourceFormatKeyword::None,
                         },
                         _ => FontFaceSourceFormatKeyword::None,
                     };
-                    if format == FontFaceSourceFormatKeyword::None {
-                        let (_, end) = url_source.url.as_str().rsplit_once('.')?;
+                    // Without a known format, guess from the extension; a URL
+                    // without one (a `data:` URL) is sniffed once loaded.
+                    if format == FontFaceSourceFormatKeyword::None
+                        && let Some((_, end)) = url_source.url.as_str().rsplit_once('.')
+                    {
                         format = match end {
                             "woff2" => FontFaceSourceFormatKeyword::Woff2,
                             "woff" => FontFaceSourceFormatKeyword::Woff,
