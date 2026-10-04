@@ -245,6 +245,41 @@ impl BaseDocument {
         full.transform_rect_bbox(overflow)
     }
 
+    /// Recompute the styles of the anonymous blocks of `node_id` from its
+    /// current style, as box construction does when it creates them.
+    fn restyle_anonymous_blocks(&mut self, node_id: NodeId) {
+        use style::selector_parser::PseudoElement;
+        use style::shared_lock::StylesheetGuards;
+
+        if self.nodes[node_id].anonymous_blocks.is_empty() {
+            return;
+        }
+        let Some(parent_style) = self.nodes[node_id]
+            .primary_styles()
+            .map(|style| style::servo_arc::Arc::clone(&style))
+        else {
+            return;
+        };
+        let anonymous_blocks = self.nodes[node_id].anonymous_blocks.clone();
+        let read_guard = self.guard.read();
+        let guards = StylesheetGuards::same(&read_guard);
+        for anon_id in anonymous_blocks {
+            let style = self.stylist.style_for_anonymous::<&crate::Node>(
+                &guards,
+                &PseudoElement::ServoAnonymousBox,
+                &parent_style,
+            );
+            if let Some(mut data) = self
+                .nodes
+                .get_mut(anon_id)
+                .and_then(|node| node.try_stylo_element_data_mut())
+                .and_then(|data| data.get_mut())
+            {
+                data.styles.primary = Some(style);
+            }
+        }
+    }
+
     /// Ensure that the layout_children field is populated for all nodes
     pub fn resolve_layout_children(&mut self) {
         resolve_layout_children_recursive(self, self.root_node().id);
@@ -295,6 +330,12 @@ impl BaseDocument {
                 damage.remove(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                 // damage.insert(RestyleDamage::RELAYOUT | RestyleDamage::REPAINT);
             } else {
+                // Restyled without reconstruction: the anonymous blocks wrapping
+                // this node's inline content inherit from it (a `color` change
+                // reaches their text only through them), so restyle them too.
+                if !damage.is_empty() {
+                    doc.restyle_anonymous_blocks(node_id);
+                }
                 //if damage.contains(CONSTRUCT_DESCENDENT) {
                 let layout_children = doc.nodes[node_id].layout_children.borrow_mut().take();
                 if let Some(layout_children) = layout_children {
