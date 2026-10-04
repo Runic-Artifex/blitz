@@ -1660,6 +1660,39 @@ impl BaseDocument {
         }
     }
 
+    /// Bring `PLACEHOLDER_SHOWN` (`:placeholder-shown`) up to date: a text
+    /// input or text area with a non-empty `placeholder` shows it while its
+    /// value is empty. Values change through typing, IME, script and
+    /// attributes, so the state is synced before each style pass.
+    pub(crate) fn sync_placeholder_shown(&mut self) {
+        let changed: Vec<(NodeId, bool)> = self
+            .nodes
+            .iter()
+            .filter_map(|(id, node)| {
+                let element = node.element_data()?;
+                let input = element.text_input_data()?;
+                let shown = element
+                    .attr(local_name!("placeholder"))
+                    .is_some_and(|p| !p.is_empty())
+                    && input.editor.raw_text().is_empty();
+                (element
+                    .element_state
+                    .contains(ElementState::PLACEHOLDER_SHOWN)
+                    != shown)
+                    .then_some((id, shown))
+            })
+            .collect();
+        for (id, shown) in changed {
+            self.snapshot_node_and(id, ElementState::PLACEHOLDER_SHOWN, |node| {
+                if let Some(data) = node.element_data_mut() {
+                    data.element_state
+                        .set(ElementState::PLACEHOLDER_SHOWN, shown);
+                }
+                node.mark_ancestors_dirty();
+            });
+        }
+    }
+
     /// Set or clear `FOCUS_WITHIN` (`:focus-within`) on `node_id` and its
     /// ancestors.
     fn set_focus_within(&mut self, node_id: NodeId, on: bool) {

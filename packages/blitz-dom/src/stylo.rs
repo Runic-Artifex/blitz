@@ -31,9 +31,9 @@ use style::properties::ComputedValues;
 use style::properties::{Importance, PropertyDeclaration};
 use style::rule_tree::CascadeLevel;
 use style::rule_tree::CascadeOrigin;
-use style::stylesheets::Origin;
 use style::selector_parser::PseudoElement;
 use style::selector_parser::RestyleDamage;
+use style::stylesheets::Origin;
 use style::stylesheets::layer_rule::LayerOrder;
 use style::stylesheets::scope_rule::ImplicitScopeRoot;
 use style::values::AtomString;
@@ -62,6 +62,7 @@ use style::values::computed::text::TextAlign as StyloTextAlign;
 
 impl crate::document::BaseDocument {
     pub fn resolve_stylist(&mut self, now: f64) {
+        self.sync_placeholder_shown();
         style::thread_state::enter(ThreadState::LAYOUT);
 
         let guard = &self.guard;
@@ -505,14 +506,18 @@ impl selectors::Element for BlitzNode<'_> {
             NonTSPseudoClass::FocusWithin => {
                 self.element_state().contains(ElementState::FOCUS_WITHIN)
             }
-            NonTSPseudoClass::FocusVisible => self.element_state().contains(ElementState::FOCUSRING),
+            NonTSPseudoClass::FocusVisible => {
+                self.element_state().contains(ElementState::FOCUSRING)
+            }
             NonTSPseudoClass::Fullscreen => false,
             NonTSPseudoClass::Hover => self.element_state().contains(ElementState::HOVER),
             NonTSPseudoClass::Indeterminate => false,
             NonTSPseudoClass::Lang(_) => false,
             NonTSPseudoClass::CustomState(_) => false,
             NonTSPseudoClass::Link => self.element_state().contains(ElementState::UNVISITED),
-            NonTSPseudoClass::PlaceholderShown => false,
+            NonTSPseudoClass::PlaceholderShown => self
+                .element_state()
+                .contains(ElementState::PLACEHOLDER_SHOWN),
             NonTSPseudoClass::ReadWrite => false,
             NonTSPseudoClass::ReadOnly => false,
             NonTSPseudoClass::ServoNonZeroBorder => false,
