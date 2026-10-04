@@ -1,4 +1,5 @@
 use blitz_traits::node_id::NodeId;
+use markup5ever::local_name;
 use parley::{AlignmentOptions, BreakReason, IndentOptions};
 use style::values::specified::box_::{DisplayInside, DisplayOutside};
 use style::values::{
@@ -186,6 +187,11 @@ impl BaseDocument {
         block_ctx: &mut BlockContext<'_>,
     ) -> taffy::LayoutOutput {
         let scale = self.viewport.scale();
+        // Chromium rounds the widths of option text up to whole pixels (Blink's
+        // menu list and list box take `ceilf` of the widest option).
+        let whole_pixels = self.nodes[node_id]
+            .element_data()
+            .is_some_and(|e| e.name.local == local_name!("option"));
         let LayoutInput {
             known_dimensions,
             parent_size,
@@ -537,7 +543,7 @@ impl BaseDocument {
                         .min(max_content_width + float_width)
                         .max(min_content_width),
                 };
-                let computed_width = ceil_layout_unit(computed_width, scale);
+                let computed_width = round_up_width(computed_width, scale, whole_pixels);
 
                 let style_width = node_size.width.map(|w| w * scale);
                 let min_width = node_min_size.width.map(|w| w * scale);
@@ -578,7 +584,7 @@ impl BaseDocument {
                 .inline_layout_data = Some(inline_layout);
 
             let measured_size = inputs.known_dimensions.unwrap_or(taffy::Size {
-                width: ceil_layout_unit(width, scale) / scale,
+                width: round_up_width(width, scale, whole_pixels) / scale,
                 // Height is ignored if RequestedAxis if Horizontal
                 height: 0.0,
             });
@@ -1046,8 +1052,10 @@ fn f32_max(a: f32, b: f32) -> f32 {
 }
 
 /// Round a width in device pixels up to the next layout unit (1/64 CSS px,
-/// Blink's `LayoutUnit::FromFloatCeil`), so that a later layout at the computed
-/// width does not wrap the text again through float error.
-fn ceil_layout_unit(width: f32, scale: f32) -> f32 {
-    (width / scale * 64.0).ceil() / 64.0 * scale
+/// Blink's `LayoutUnit::FromFloatCeil`), or to a whole CSS pixel, so that a
+/// later layout at the computed width does not wrap the text again through
+/// float error.
+fn round_up_width(width: f32, scale: f32, whole_pixels: bool) -> f32 {
+    let unit = if whole_pixels { 1.0 } else { 64.0 };
+    (width / scale * unit).ceil() / unit * scale
 }
