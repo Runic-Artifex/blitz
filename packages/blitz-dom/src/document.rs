@@ -1711,6 +1711,61 @@ impl BaseDocument {
         }
     }
 
+    /// Snapshots of the CSS animations and transitions of `node_id` (its own,
+    /// not its pseudo-elements'), for an embedder implementing
+    /// `Element.getAnimations()`: times are on the timeline the document is
+    /// resolved with (`resolve(current_time)`).
+    pub fn animations_of(&self, node_id: NodeId) -> Vec<AnimationSnapshot> {
+        use style::animation::{AnimationState, KeyframesIterationState};
+        let state = |s: &AnimationState| match s {
+            AnimationState::Pending => AnimationPhase::Pending,
+            AnimationState::Running => AnimationPhase::Running,
+            AnimationState::Paused(_) => AnimationPhase::Paused,
+            AnimationState::Finished => AnimationPhase::Finished,
+            AnimationState::Canceled => AnimationPhase::Canceled,
+        };
+        let sets = self.animations.sets.read();
+        let mut out = Vec::new();
+        for (key, set) in sets.iter() {
+            if key.node.id() as u64 != node_id.as_u64() || key.pseudo_element.is_some() {
+                continue;
+            }
+            for animation in &set.animations {
+                let iterations = match animation.iteration_state {
+                    KeyframesIterationState::Infinite(_) => None,
+                    KeyframesIterationState::Finite(_, max) => Some(max),
+                };
+                out.push(AnimationSnapshot {
+                    transition_property: None,
+                    animation_name: Some(animation.name.to_string()),
+                    phase: state(&animation.state),
+                    start_time: animation.started_at,
+                    delay: animation.delay,
+                    duration: animation.duration,
+                    iterations,
+                });
+            }
+            for transition in &set.transitions {
+                out.push(AnimationSnapshot {
+                    transition_property: Some(
+                        transition
+                            .property_animation
+                            .property_id()
+                            .name()
+                            .to_string(),
+                    ),
+                    animation_name: None,
+                    phase: state(&transition.state),
+                    start_time: transition.start_time,
+                    delay: transition.delay,
+                    duration: transition.property_animation.duration,
+                    iterations: Some(1.0),
+                });
+            }
+        }
+        out
+    }
+
     /// Set whether the focused element matches `:focus-visible` (its
     /// `FOCUSRING` state). Focusing sets it; an embedder that tracks input
     /// modality (keyboard or pointer, as browsers' focus-visible heuristics
@@ -3476,4 +3531,31 @@ mod font_face_override_tests {
              not the font file's internal `name` table entry",
         );
     }
+}
+
+/// The phase of a CSS animation or transition (Stylo's animation state).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnimationPhase {
+    Pending,
+    Running,
+    Paused,
+    Finished,
+    Canceled,
+}
+
+/// A CSS animation or transition of an element ([`BaseDocument::animations_of`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnimationSnapshot {
+    /// The property a transition animates (None for a CSS animation).
+    pub transition_property: Option<String>,
+    /// The `@keyframes` name of a CSS animation (None for a transition).
+    pub animation_name: Option<String>,
+    pub phase: AnimationPhase,
+    /// When the animation started (after its delay for CSS animations), on
+    /// the document's animation timeline, in seconds.
+    pub start_time: f64,
+    pub delay: f64,
+    pub duration: f64,
+    /// The iteration count (None: infinite).
+    pub iterations: Option<f64>,
 }
