@@ -18,11 +18,24 @@ impl ElementCx<'_, '_> {
         let type_attr = self.node.attr(local_name!("type"));
         let disabled = self.node.attr(local_name!("disabled")).is_some();
 
-        // TODO this should be coming from css accent-color, but I couldn't find how to retrieve it
-        let accent_color = if disabled {
-            Color::from_rgba8(209, 209, 209, 255)
+        // Chromium paints checkboxes and radio buttons in fixed colours, not
+        // the element's `color`: a #767676 border (#4f4f4f hovered), filled
+        // with its accent colour (#0075ff, #005cc8 hovered; `accent-color:
+        // auto`, which Stylo's servo mode does not parse) when checked.
+        let hovered = self.node.is_hovered();
+        let (accent_color, border_color) = if disabled {
+            let grey = Color::from_rgba8(209, 209, 209, 255);
+            (grey, grey)
+        } else if hovered {
+            (
+                Color::from_rgba8(0x00, 0x5c, 0xc8, 255),
+                Color::from_rgba8(0x4f, 0x4f, 0x4f, 255),
+            )
         } else {
-            self.style.clone_color().as_srgb_color()
+            (
+                Color::from_rgba8(0x00, 0x75, 0xff, 255),
+                Color::from_rgba8(0x76, 0x76, 0x76, 255),
+            )
         };
 
         let width = self.frame.border_box.width();
@@ -34,11 +47,27 @@ impl ElementCx<'_, '_> {
 
         match type_attr {
             Some("checkbox") => {
-                draw_checkbox(scene, checked, frame, self.transform, accent_color, scale);
+                draw_checkbox(
+                    scene,
+                    checked,
+                    frame,
+                    self.transform,
+                    accent_color,
+                    border_color,
+                    scale,
+                );
             }
             Some("radio") => {
                 let center = frame.center();
-                draw_radio_button(scene, checked, center, self.transform, accent_color, scale);
+                draw_radio_button(
+                    scene,
+                    checked,
+                    center,
+                    self.transform,
+                    accent_color,
+                    border_color,
+                    scale,
+                );
             }
             _ => {}
         }
@@ -51,6 +80,7 @@ fn draw_checkbox(
     frame: RoundedRect,
     transform: Affine,
     accent_color: Color,
+    border_color: Color,
     scale: f64,
 ) {
     if checked {
@@ -75,8 +105,12 @@ fn draw_checkbox(
 
         scene.stroke(&style, transform, Color::WHITE, None, &path);
     } else {
-        scene.fill(Fill::NonZero, transform, Color::WHITE, None, &frame);
-        scene.stroke(&Stroke::default(), transform, accent_color, None, &frame);
+        // A one pixel border inside the box (a stroke centred on its edge
+        // would straddle pixels and paint lighter).
+        let inset = frame.rect().inset(-scale.max(1.0));
+        let inner = inset.to_rounded_rect((frame.radii().top_left - scale).max(0.0));
+        scene.fill(Fill::NonZero, transform, border_color, None, &frame);
+        scene.fill(Fill::NonZero, transform, Color::WHITE, None, &inner);
     }
 }
 
@@ -86,6 +120,7 @@ fn draw_radio_button(
     center: Point,
     transform: Affine,
     accent_color: Color,
+    border_color: Color,
     scale: f64,
 ) {
     let outer_ring = Circle::new(center, 8.0 * scale);
@@ -96,8 +131,7 @@ fn draw_radio_button(
         scene.fill(Fill::NonZero, transform, Color::WHITE, None, &gap);
         scene.fill(Fill::NonZero, transform, accent_color, None, &inner_circle);
     } else {
-        const GRAY: Color = color::palette::css::GRAY;
-        scene.fill(Fill::NonZero, transform, GRAY, None, &outer_ring);
+        scene.fill(Fill::NonZero, transform, border_color, None, &outer_ring);
         scene.fill(Fill::NonZero, transform, Color::WHITE, None, &gap);
     }
 }
