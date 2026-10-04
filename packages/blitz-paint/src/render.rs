@@ -321,41 +321,12 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         }
         let has_opacity = opacity < 1.0;
 
-        // TODO: account for overflow_x vs overflow_y
-        let overflow_x = styles.get_box().overflow_x;
-        let overflow_y = styles.get_box().overflow_y;
-        // `contain: paint` (and stronger values like `strict`/`content`) clips the element's
-        // contents to its padding box. Paint containment does not apply to non-atomic inlines
-        // or internal table boxes other than table-cell.
-        let contain_paint = styles.get_box().clone_contain().contains(Contain::PAINT) && {
-            let display = styles.clone_display();
-            let is_internal_table_box_other_than_cell = display.outside()
-                == DisplayOutside::InternalTable
-                && display.inside() != DisplayInside::TableCell;
-            !display.is_inline_flow() && !is_internal_table_box_other_than_cell
-        };
-        let is_image = node
-            .element_data()
-            .and_then(|e| e.raster_image_data())
-            .is_some();
-        let is_sub_doc = node
-            .element_data()
-            .and_then(|el| el.sub_doc_data())
-            .is_some();
         let is_text_input = node
             .element_data()
             .and_then(|el| el.text_input_data())
             .is_some();
-        // The root element's overflow is propagated to the viewport (which is clipped by the
-        // window/surface bounds), so the root element must not clip its own overflow.
-        let is_root_element = self.root_element_id == Some(node_id);
-        let should_clip = !is_root_element
-            && (is_image
-                || is_sub_doc
-                || is_text_input
-                || contain_paint
-                || !matches!(overflow_x, Overflow::Visible)
-                || !matches!(overflow_y, Overflow::Visible));
+        // Hit testing clips with the same predicate (`Node::clips_overflow`).
+        let should_clip = node.clips_overflow();
 
         // Apply padding/border offset to inline root
         let taffy::Layout {

@@ -1288,6 +1288,44 @@ impl Node {
         self.hit_inner(x, y, scale, &mut None)
     }
 
+    /// Whether this node clips its descendants: to its content box for text
+    /// inputs, else to its padding box. Painting and hit testing both use it.
+    ///
+    /// Images, sub-documents, text inputs, `contain: paint` and an `overflow`
+    /// other than `visible` clip, except on the root element, whose overflow
+    /// is propagated to the viewport.
+    pub fn clips_overflow(&self) -> bool {
+        use style::values::computed::{Contain, Overflow};
+
+        let Some(styles) = self.primary_styles() else {
+            return false;
+        };
+        let is_root_element = self
+            .parent
+            .is_some_and(|parent| self.with(parent).parent.is_none());
+        if is_root_element {
+            return false;
+        }
+        // `contain: paint` (and stronger values like `strict`/`content`) clips the element's
+        // contents to its padding box. Paint containment does not apply to non-atomic inlines
+        // or internal table boxes other than table-cell.
+        let contain_paint = styles.get_box().clone_contain().contains(Contain::PAINT) && {
+            let display = styles.clone_display();
+            let is_internal_table_box_other_than_cell = display.outside()
+                == DisplayOutside::InternalTable
+                && display.inside() != DisplayInside::TableCell;
+            !display.is_inline_flow() && !is_internal_table_box_other_than_cell
+        };
+        let element_data = self.element_data();
+        element_data.is_some_and(|e| {
+            e.raster_image_data().is_some()
+                || e.sub_doc_data().is_some()
+                || e.text_input_data().is_some()
+        }) || contain_paint
+            || !matches!(styles.get_box().overflow_x, Overflow::Visible)
+            || !matches!(styles.get_box().overflow_y, Overflow::Visible)
+    }
+
     /// [`hit`](Self::hit), also resolving the innermost overlay scrollbar
     /// thumb under the point into `scrollbar` during the same descent (so
     /// thumb hit-testing shares the exact coordinate handling — transforms
@@ -1327,11 +1365,12 @@ impl Node {
             y = (p.y / scale) as f32;
         }
 
+        // The point in this node's unscrolled border-box coordinates.
+        let box_x = x - self.scroll_offset().x as f32;
+        let box_y = y - self.scroll_offset().y as f32;
         let size = self.final_layout().size;
-        let matches_self = !(x < 0.0
-            || x > size.width + self.scroll_offset().x as f32
-            || y < 0.0
-            || y > size.height + self.scroll_offset().y as f32);
+        let matches_self =
+            !(box_x < 0.0 || box_x > size.width || box_y < 0.0 || box_y > size.height);
 
         let overflow_rect = self.final_layout().scrollable_overflow_rect;
         let matches_content = !(x < 0.0
@@ -1364,13 +1403,33 @@ impl Node {
 
         // Descendants overwrite, so the innermost scroll container's thumb
         // wins. Thumb coords are border-box relative (unscrolled).
-        if matches_self
-            && let Some(sb) = self.scrollbar_at_local(
-                (x - self.scroll_offset().x as f32) as f64,
-                (y - self.scroll_offset().y as f32) as f64,
-            )
-        {
+        if matches_self && let Some(sb) = self.scrollbar_at_local(box_x as f64, box_y as f64) {
             *scrollbar = Some(sb);
+        }
+
+        // Descendants are painted clipped (see `clips_overflow`), so outside
+        // the clip only this node's own box can be hit.
+        if self.clips_overflow() {
+            let layout = self.final_layout();
+            let mut inset = layout.border;
+            if self
+                .element_data()
+                .is_some_and(|e| e.text_input_data().is_some())
+            {
+                inset = inset + layout.padding;
+            }
+            let inside_clip = box_x >= inset.left
+                && box_x <= size.width - inset.right
+                && box_y >= inset.top
+                && box_y <= size.height - inset.bottom;
+            if !inside_clip {
+                return (matches_self && !pointer_events_none).then_some(HitResult {
+                    node_id: self.id,
+                    x,
+                    y,
+                    is_text: false,
+                });
+            }
         }
 
         let content_box_offset = taffy::Point {
