@@ -31,6 +31,7 @@ use style::properties::ComputedValues;
 use style::properties::{Importance, PropertyDeclaration};
 use style::rule_tree::CascadeLevel;
 use style::rule_tree::CascadeOrigin;
+use style::stylesheets::Origin;
 use style::selector_parser::PseudoElement;
 use style::selector_parser::RestyleDamage;
 use style::stylesheets::layer_rule::LayerOrder;
@@ -78,6 +79,33 @@ impl crate::document::BaseDocument {
         self.stylist
             .flush(&guards)
             .process_style(root, Some(&self.snapshots));
+
+        // `:has()`: Blitz does not run Stylo's relative selector invalidation,
+        // so while a stylesheet has a relative selector, any DOM mutation or
+        // element state or attribute change restyles the whole document. Coarse
+        // but correct; per-dependency invalidation is a later refinement.
+        let has_relative_selectors = [Origin::UserAgent, Origin::User, Origin::Author]
+            .into_iter()
+            .any(|origin| {
+                self.stylist
+                    .cascade_data()
+                    .borrow_for_origin(origin)
+                    .relative_invalidation_map_attributes()
+                    .used
+            });
+        if has_relative_selectors {
+            let root_id = root.id;
+            let root = &self.nodes[root_id];
+            let changed = !self.snapshots.is_empty()
+                || root.has_dirty_descendants()
+                || root
+                    .try_stylo_element_data()
+                    .and_then(|data| data.get())
+                    .is_some_and(|data| !data.hint.is_empty());
+            if changed {
+                self.nodes[root_id].set_restyle_hint(RestyleHint::restyle_subtree());
+            }
+        }
 
         // Mark actively animating nodes as dirty
         let mut sets = self.animations.sets.write();
