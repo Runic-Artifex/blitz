@@ -122,7 +122,19 @@ impl Node {
             .then(|| self.primary_styles())
             .flatten()
             .map(|style| style.clone_color())
-            .map(|color| color.to_css_string());
+            // usvg parses sRGB colours only: `oklch()`, `color-mix()` results
+            // and other spaces are converted as painting converts them.
+            .map(|color| {
+                use crate::util::ToColorColor as _;
+                let rgba = color.as_color_color().to_rgba8();
+                format!(
+                    "rgba({}, {}, {}, {})",
+                    rgba.r,
+                    rgba.g,
+                    rgba.b,
+                    f32::from(rgba.a) / 255.0
+                )
+            });
 
         match &self.data {
             NodeData::Document(_) => {}
