@@ -471,6 +471,13 @@ impl Node {
         Some(self.primary_styles().as_ref()?.clone_display())
     }
 
+    /// Whether this is a `<button>` element.
+    pub(crate) fn is_button(&self) -> bool {
+        self.data
+            .downcast_element()
+            .is_some_and(|el| el.name.local == local_name!("button"))
+    }
+
     /// Whether this is a `<button>` whose `display` is a flow layout (`block`,
     /// `inline-block`, `flow-root`, ...). Browsers lay such a button out with
     /// an anonymous button content box, centred vertically, and (block-level
@@ -479,9 +486,7 @@ impl Node {
     /// Blitz constructs and lays it out as a flex column that places its
     /// content as that box would (`StyleFlags::BUTTON_CONTENT_BOX`).
     pub(crate) fn is_flow_button(&self) -> bool {
-        self.data
-            .downcast_element()
-            .is_some_and(|el| el.name.local == local_name!("button"))
+        self.is_button()
             && self.display_style().is_some_and(|display| {
                 matches!(
                     display.inside(),

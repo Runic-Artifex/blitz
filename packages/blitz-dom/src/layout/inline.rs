@@ -351,6 +351,7 @@ impl BaseDocument {
 
         // Update inline boxes
         for ibox in inline_layout.layout.inline_boxes_mut() {
+            let is_button = self.nodes[NodeId::from_u64(ibox.id)].is_button();
             let style = self.nodes[NodeId::from_u64(ibox.id)].layout_style();
             let margin = style
                 .margin()
@@ -369,6 +370,14 @@ impl BaseDocument {
             // atomic inlines (flex, grid, table) export a baseline regardless of `overflow`,
             // clamped to their border box if they are scroll containers (css-align-3 §9.1).
             // A layout-contained box is treated as having no baseline (css-contain-1 §3.3).
+            //
+            // A `<button>` is laid out as a flex box whatever its `display` (Chromium's
+            // LayoutButton; Blitz lays a flow button out as a flex column), so the CSS 2
+            // rule does not apply to it: a flow button exports the last baseline of its
+            // content (`BaseDocument::button_content_baselines`), a flex or grid button its
+            // first, clamped if it is a scroll container. A button without a baseline
+            // synthesizes one at its content box's bottom edge, not its margin box's
+            // (Chromium; an empty button's baseline is below its padding).
             let overflow = style.overflow();
             let box_style = style.style.get_box();
             let is_flow = matches!(
@@ -376,9 +385,20 @@ impl BaseDocument {
                 DisplayInside::Flow | DisplayInside::FlowRoot
             );
             let is_scroll_container = !matches!(overflow.y, Overflow::Visible | Overflow::Clip);
-            let is_block_axis_scroll_container = is_flow && is_scroll_container;
+            let is_block_axis_scroll_container = is_flow && is_scroll_container && !is_button;
             let contain_layout = box_style.clone_contain().contains(Contain::LAYOUT);
             let exports_baseline = !is_block_axis_scroll_container && !contain_layout;
+            let content_box_bottom_inset = is_button.then(|| {
+                let parent_width = inputs.parent_size.width;
+                style
+                    .border()
+                    .resolve_or_zero(parent_width, resolve_calc_value)
+                    .bottom
+                    + style
+                        .padding()
+                        .resolve_or_zero(parent_width, resolve_calc_value)
+                        .bottom
+            });
             let box_inputs = inline_box_inputs(style.size().width, margin, child_inputs);
             drop(style);
 
@@ -404,7 +424,11 @@ impl BaseDocument {
                         })
                 } else {
                     None
-                };
+                }
+                .or_else(|| {
+                    content_box_bottom_inset
+                        .map(|inset| (margin.top + output.size.height - inset) * scale)
+                });
                 // Vertical margins adjust the space the box reserves in the line. A box with a
                 // baseline splits that space into ascent (`margin.top + baseline`) and descent
                 // (`margin.bottom + height - baseline`), either of which may be negative. A box

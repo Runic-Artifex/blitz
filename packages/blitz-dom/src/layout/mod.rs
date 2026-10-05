@@ -85,6 +85,43 @@ impl BaseDocument {
 }
 
 impl BaseDocument {
+    /// The baselines of a flow `<button>` (`Node::is_flow_button`), laid out as a
+    /// flex column around its anonymous button content box: those of the content
+    /// box, as Chromium's LayoutButton exports them. The first baseline is the
+    /// content's first line (a flex or grid item without one is aligned on its
+    /// synthesized border-box edge, not on the content box's), the last is its
+    /// last line. Layout containment suppresses both.
+    fn button_content_baselines(&self, node_id: NodeId) -> taffy::Baselines {
+        let node = &self.nodes[dom_node_id(node_id)];
+        let contain_layout = node.primary_styles().is_some_and(|style| {
+            style
+                .get_box()
+                .clone_contain()
+                .contains(style::values::computed::Contain::LAYOUT)
+        });
+        if contain_layout {
+            return taffy::Baselines::NONE;
+        }
+        let layout_children = node.layout_children.borrow();
+        let Some(content) = layout_children
+            .iter()
+            .flatten()
+            .map(|&id| &self.nodes[id])
+            .find(|child| child.is_anonymous())
+        else {
+            return taffy::Baselines::NONE;
+        };
+        let offset = content.unrounded_layout().location.y;
+        let baselines = content.layout_data().baselines;
+        taffy::Baselines {
+            first: baselines.first.map(|baseline| offset + baseline),
+            last: baselines
+                .last
+                .or(baselines.first)
+                .map(|baseline| offset + baseline),
+        }
+    }
+
     /// Run the node's layout algorithm, then lay out the out-of-flow (absolute/fixed)
     /// boxes for which it is the containing block. Must be called inside the layout
     /// cache wrapper so that cache hits do not re-run the out-of-flow pass.
@@ -430,10 +467,19 @@ impl BaseDocument {
                     return self.compute_inline_layout(dom_node_id(node_id), inputs, block_ctx);
                 }
 
+                let is_flow_button = node.is_flow_button();
+
                 // The default CSS file will set
                 match node.taffy_display() {
                     Display::Block => compute_block_layout(self, node_id, inputs, block_ctx),
                     Display::FlowRoot => compute_block_layout(self, node_id, inputs, None),
+                    Display::Flex if is_flow_button => {
+                        let mut output = compute_flexbox_layout(self, node_id, inputs);
+                        if inputs.run_mode == RunMode::PerformLayout {
+                            output.baselines = self.button_content_baselines(node_id);
+                        }
+                        output
+                    }
                     Display::Flex => compute_flexbox_layout(self, node_id, inputs),
                     Display::Grid => compute_grid_layout(self, node_id, inputs),
                     Display::None => taffy::LayoutOutput::HIDDEN,
@@ -503,9 +549,15 @@ impl LayoutPartialTree for BaseDocument {
         node_id: NodeId,
         inputs: taffy::LayoutInput,
     ) -> taffy::LayoutOutput {
-        compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
+        let output = compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
             tree.compute_child_layout_internal(node_id, inputs, None)
-        })
+        });
+        // Kept for the parent: a flow `<button>` exports its anonymous content
+        // box's baselines (`BaseDocument::button_content_baselines`).
+        if inputs.run_mode == RunMode::PerformLayout {
+            self.node_from_id_mut(node_id).layout_data_mut().baselines = output.baselines;
+        }
+        output
     }
 }
 

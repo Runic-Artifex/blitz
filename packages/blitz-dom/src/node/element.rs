@@ -129,6 +129,9 @@ pub struct LayoutData {
     pub final_layout: Layout,
     pub scroll_offset: crate::Point<f64>,
     pub scrollable_overflow: KurboRect,
+    /// The baselines of the node's last `RunMode::PerformLayout`, relative to its
+    /// border box (a flow `<button>` exports its anonymous content box's).
+    pub baselines: taffy::Baselines,
 }
 
 impl LayoutData {
@@ -139,6 +142,7 @@ impl LayoutData {
             final_layout: Layout::new(),
             scroll_offset: crate::Point::ZERO,
             scrollable_overflow: KurboRect::ZERO,
+            baselines: taffy::Baselines::NONE,
         }
     }
 }
