@@ -1232,6 +1232,16 @@ impl<'a> TElement for BlitzNode<'a> {
         if let Some(lang) = lang {
             push_style(PropertyDeclaration::XLang(XLang(Atom::from(lang))));
         }
+
+        #[cfg(feature = "svg")]
+        if elem.name.ns == ns!(svg) {
+            let is_outermost_svg = *tag == local_name!("svg")
+                && self
+                    .parent
+                    .and_then(|id| self.tree()[id].data.downcast_element())
+                    .is_none_or(|parent| parent.name.ns != ns!(svg));
+            push_svg_presentation_hints(elem, is_outermost_svg, &mut push_style);
+        }
     }
 
     fn local_name(&self) -> &LocalName {
@@ -1334,6 +1344,87 @@ pub struct RegisteredPaintersImpl;
 impl RegisteredSpeculativePainters for RegisteredPaintersImpl {
     fn get(&self, _name: &Atom) -> Option<&dyn RegisteredSpeculativePainter> {
         None
+    }
+}
+
+/// Map the SVG presentation attributes of an SVG element to their CSS
+/// properties: <https://svgwg.org/svg2-draft/styling.html#PresentationAttributes>.
+///
+/// As in browsers, they apply at author level with zero specificity, so any
+/// stylesheet rule overrides them, and their values inherit as CSS values (a
+/// `stroke="currentColor"` resolves with each descendant's own `color`). Inline
+/// SVG is drawn from a serialisation of these computed values
+/// (`Node::svg_source`). Values are parsed as CSS with SVG's unitless lengths;
+/// one that does not parse is ignored, as in Chromium. `transform` takes SVG's
+/// own syntax and maps to the CSS `transform`, except on an outermost `<svg>`,
+/// whose box is transformed by CSS alone.
+#[cfg(feature = "svg")]
+fn push_svg_presentation_hints(
+    elem: &crate::node::ElementData,
+    is_outermost_svg: bool,
+    push_style: &mut impl FnMut(PropertyDeclaration),
+) {
+    use style::properties::{PropertyId, SourcePropertyDeclaration, parse_one_declaration_into};
+    use style::stylesheets::{CssRuleType, UrlExtraData};
+    use style_traits::ParsingMode;
+
+    static URL_DATA: std::sync::LazyLock<UrlExtraData> = std::sync::LazyLock::new(|| {
+        UrlExtraData(Arc::new(url::Url::parse("about:blank").unwrap()))
+    });
+
+    for attr in elem.attrs() {
+        if attr.name.ns != ns!() {
+            continue;
+        }
+        let name = attr.name.local.as_ref();
+        let transform;
+        let value = match name {
+            "fill" | "fill-opacity" | "fill-rule" | "stroke" | "stroke-width"
+            | "stroke-opacity" | "stroke-linecap" | "stroke-linejoin" | "stroke-miterlimit"
+            | "stroke-dasharray" | "stroke-dashoffset" | "opacity" | "visibility" | "display"
+            | "color" => attr.value.as_str(),
+            "transform" if !is_outermost_svg => {
+                let Ok(t) = attr.value.parse::<svgtypes::Transform>() else {
+                    continue;
+                };
+                transform = format!(
+                    "matrix({}, {}, {}, {}, {}, {})",
+                    t.a, t.b, t.c, t.d, t.e, t.f
+                );
+                transform.as_str()
+            }
+            _ => continue,
+        };
+        // Presentation attributes take plain values: no `var()`, no CSS-wide keywords.
+        if value.contains("var(")
+            || matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "inherit" | "initial" | "unset" | "revert" | "revert-layer"
+            )
+        {
+            continue;
+        }
+        let Ok(property_id) = PropertyId::parse_enabled_for_all_content(name) else {
+            continue;
+        };
+        let mut declarations = SourcePropertyDeclaration::default();
+        if parse_one_declaration_into(
+            &mut declarations,
+            property_id,
+            value,
+            Origin::Author,
+            &URL_DATA,
+            None,
+            ParsingMode::ALLOW_UNITLESS_LENGTH | ParsingMode::ALLOW_ALL_NUMERIC_VALUES,
+            QuirksMode::NoQuirks,
+            CssRuleType::Style,
+        )
+        .is_ok()
+        {
+            for declaration in declarations.drain().declarations {
+                push_style(declaration);
+            }
+        }
     }
 }
 

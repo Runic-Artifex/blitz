@@ -5,6 +5,7 @@
 @namespace url(http://www.w3.org/1999/xhtml);
 /* set default namespace to HTML */
 @namespace xul url(http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul);
+@namespace svg url(http://www.w3.org/2000/svg);
 
 @font-face {
     font-family: -moz-bullet-font;
@@ -56,6 +57,13 @@ input {
 /* https://html.spec.whatwg.org/#hidden-elements */
 input[type="hidden" i] {
     display: none !important;
+}
+
+/* SVG content transforms about the origin of its user space, as in
+ * Chromium's and Gecko's svg.css: every SVG element but an outermost <svg>. */
+svg|*:not(svg|svg),
+svg|*:not(svg|foreignObject) > svg|svg {
+    transform-origin: 0 0;
 }
 
 input[type="checkbox"] {
