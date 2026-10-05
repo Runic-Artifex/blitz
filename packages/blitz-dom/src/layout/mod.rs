@@ -122,6 +122,69 @@ impl BaseDocument {
         }
     }
 
+    /// The first baseline of a grid container whose first row has no item aligned
+    /// on baselines: the first baseline of the first item (in document order) in its
+    /// first row, clamped to the item's border box if the item is a scroll container
+    /// (css-grid-1 §10.8, as Chromium). Taffy computes baselines only for items aligned
+    /// on baselines and otherwise synthesizes the container's from that item's bottom
+    /// edge, which stays the baseline of an item without one. `None` keeps Taffy's.
+    fn grid_first_item_baseline(&self, node_id: NodeId) -> Option<f32> {
+        let node = &self.nodes[dom_node_id(node_id)];
+        let DetailedLayoutInfo::Grid(info) = &node.element_data()?.detailed_layout_info else {
+            return None;
+        };
+        // The in-flow items, as Taffy's grid collects them: `info.items` has their
+        // grid areas in the same order.
+        let items: Vec<_> = node
+            .layout_children
+            .borrow()
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|&child| {
+                let style = self.nodes[child].layout_style();
+                style.box_generation_mode() != taffy::BoxGenerationMode::None
+                    && !style.position().is_out_of_flow()
+            })
+            .collect();
+        if items.len() != info.items.len() {
+            return None;
+        }
+        let first_row = info.items.iter().map(|area| area.row_start).min()?;
+        let mut first_row_items = items
+            .iter()
+            .zip(&info.items)
+            .filter(|(_, area)| area.row_start == first_row)
+            .map(|(&child, _)| child);
+        let container_style = node.layout_style();
+        let align_items = taffy::GridContainerStyle::align_items(&container_style);
+        let is_baseline_aligned = |child: blitz_traits::node_id::NodeId| {
+            let style = self.nodes[child].layout_style();
+            taffy::GridItemStyle::align_self(&style)
+                .or(align_items)
+                .is_some_and(|align| align.keyword == taffy::AlignItemsKeyword::Baseline)
+        };
+        if first_row_items.clone().any(is_baseline_aligned) {
+            return None;
+        }
+        let item = &self.nodes[first_row_items.next()?];
+        let baseline = item.layout_data().baselines.first?;
+        let layout = item.unrounded_layout();
+        let is_scroll_container = item.primary_styles().is_some_and(|style| {
+            !matches!(
+                style.clone_overflow_y(),
+                style::values::computed::Overflow::Visible
+                    | style::values::computed::Overflow::Clip
+            )
+        });
+        let baseline = if is_scroll_container {
+            baseline.clamp(0.0, layout.size.height)
+        } else {
+            baseline
+        };
+        Some(layout.location.y + baseline)
+    }
+
     /// Run the node's layout algorithm, then lay out the out-of-flow (absolute/fixed)
     /// boxes for which it is the containing block. Must be called inside the layout
     /// cache wrapper so that cache hits do not re-run the out-of-flow pass.
@@ -481,7 +544,16 @@ impl BaseDocument {
                         output
                     }
                     Display::Flex => compute_flexbox_layout(self, node_id, inputs),
-                    Display::Grid => compute_grid_layout(self, node_id, inputs),
+                    Display::Grid => {
+                        let mut output = compute_grid_layout(self, node_id, inputs);
+                        if inputs.run_mode == RunMode::PerformLayout
+                            && output.baselines.first.is_some()
+                            && let Some(baseline) = self.grid_first_item_baseline(node_id)
+                        {
+                            output.baselines.first = Some(baseline);
+                        }
+                        output
+                    }
                     Display::None => taffy::LayoutOutput::HIDDEN,
                 }
             }
