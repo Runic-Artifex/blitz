@@ -4,17 +4,26 @@ pub(crate) use style::computed_values::filter::single_value::T as StyloFilter;
 
 use anyrender::filters::{Filter, FilterEffect};
 
-pub(crate) fn convert_filters(filters: &[StyloFilter]) -> Option<Filter> {
+/// Convert a `filter` or `backdrop-filter` list. `current_color` is the
+/// element's `color`, which a `drop-shadow()` without a colour (or with
+/// `currentColor`) takes.
+pub(crate) fn convert_filters(
+    filters: &[StyloFilter],
+    current_color: &AbsoluteColor,
+) -> Option<Filter> {
     if filters.is_empty() {
         return None;
     }
 
-    Some(Filter::linear_list(
-        filters.iter().filter_map(convert_single_filter),
-    ))
+    Some(Filter::linear_list(filters.iter().filter_map(|filter| {
+        convert_single_filter(filter, current_color)
+    })))
 }
 
-pub(crate) fn convert_single_filter(filter: &StyloFilter) -> Option<FilterEffect> {
+pub(crate) fn convert_single_filter(
+    filter: &StyloFilter,
+    current_color: &AbsoluteColor,
+) -> Option<FilterEffect> {
     Some(match filter {
         StyloFilter::Blur(radius) => FilterEffect::blur(radius.px()),
         StyloFilter::Brightness(amount) => FilterEffect::brightness(amount.0),
@@ -29,10 +38,9 @@ pub(crate) fn convert_single_filter(filter: &StyloFilter) -> Option<FilterEffect
             shadow.horizontal.px(),
             shadow.vertical.px(),
             shadow.blur.px(),
-            // TODO: pass in correct currentColor
             shadow
                 .color
-                .resolve_to_absolute(&AbsoluteColor::BLACK)
+                .resolve_to_absolute(current_color)
                 .as_color_color(),
         ),
         StyloFilter::Url(_) => return None,

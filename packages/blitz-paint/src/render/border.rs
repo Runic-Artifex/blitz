@@ -598,6 +598,16 @@ impl ElementCx<'_, '_> {
     /// ❌ outset - Defines a 3D outset border. The effect depends on the border-color value
     /// ✅ none - Defines no border
     /// ✅ hidden - Defines a hidden border
+    /// The area the outline can paint, with the border box.
+    pub(crate) fn outline_extent(&self) -> Rect {
+        let outline = self.style.get_outline();
+        match outline.outline_style {
+            OutlineStyle::BorderStyle(BorderStyle::None | BorderStyle::Hidden)
+            | OutlineStyle::Auto => self.frame.border_box,
+            OutlineStyle::BorderStyle(_) => self.frame.outline_box.union(self.frame.border_box),
+        }
+    }
+
     pub(crate) fn draw_outline(&self, scene: &mut impl PaintScene) {
         let outline = self.style.get_outline();
 

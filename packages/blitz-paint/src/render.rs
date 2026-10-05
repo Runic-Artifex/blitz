@@ -444,8 +444,19 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             None,
         );
 
-        cx.draw_outline(scene);
-        cx.draw_outset_box_shadow(scene);
+        let current_color = cx.style.clone_color();
+        let filter = convert_filters(&effects.filter.0, &current_color).map(Arc::new);
+        let backdrop_filter =
+            convert_filters(&effects.backdrop_filter.0, &current_color).map(Arc::new);
+
+        // Opacity and filters apply to the element's whole rendering, its
+        // outline and outer box shadows included: they are drawn inside the
+        // effect layer when there is one.
+        let decorations_in_effect_layer = has_opacity || filter.is_some();
+        if !decorations_in_effect_layer {
+            cx.draw_outline(scene);
+            cx.draw_outset_box_shadow(scene);
+        }
 
         // clip-path clip ayer
         self.layer_manager.maybe_with_layer(
@@ -464,9 +475,6 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 // Save it so that the mask can be drawn untransformed by scroll offsets.
                 let unscrolled_transform = cx.transform;
 
-                let filter = convert_filters(&effects.filter.0).map(Arc::new);
-                let backdrop_filter = convert_filters(&effects.backdrop_filter.0).map(Arc::new);
-
                 // Adjust effect layer clip by filter expansion area
                 //
                 // Returns a rectangle centered at the origin representing how much the filter
@@ -480,23 +488,60 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                     .map(|f| f.expansion_rect())
                     .unwrap_or(Rect::ZERO);
 
+                // The effect layer covers what the element paints: its border box and,
+                // when they are drawn in the layer, its outline, outer box shadows and
+                // content overflowing the border box (unless the element clips it).
                 let mut effect_layer_clip = cx.frame.border_box_path().bounding_box();
+                if decorations_in_effect_layer {
+                    effect_layer_clip = effect_layer_clip
+                        .union(cx.outline_extent())
+                        .union(cx.outset_box_shadow_extent());
+                    if !should_clip {
+                        effect_layer_clip = effect_layer_clip.union(*node.scrollable_overflow());
+                    }
+                }
                 effect_layer_clip.x0 += filter_expansion_area.x0;
                 effect_layer_clip.y0 += filter_expansion_area.y0;
                 effect_layer_clip.x1 += filter_expansion_area.x1;
                 effect_layer_clip.y1 += filter_expansion_area.y1;
 
+                // A backdrop filter without a filter is drawn in a layer of its own,
+                // clipped to the border box with its rounded corners; the element's
+                // content is not clipped by it. With a filter as well, both stay in
+                // one layer clipped as above.
+                let separate_backdrop = filter.is_none() && backdrop_filter.is_some();
+                let (layer_backdrop, own_backdrop) = if separate_backdrop {
+                    (None, backdrop_filter)
+                } else {
+                    (backdrop_filter, None)
+                };
+
                 // Opacity/Filter layer if box has opacity or a filter.
-                // Clipped to border-box as it needs to include the background and borders.
                 self.layer_manager.maybe_with_layer(
                     scene,
-                    has_opacity || filter.is_some() || backdrop_filter.is_some(),
+                    has_opacity || filter.is_some() || layer_backdrop.is_some(),
                     opacity,
                     cx.transform,
                     &effect_layer_clip,
                     filter,
-                    backdrop_filter,
+                    layer_backdrop,
                     |scene| {
+                        if decorations_in_effect_layer {
+                            cx.draw_outline(scene);
+                            cx.draw_outset_box_shadow(scene);
+                        }
+                        if own_backdrop.is_some() {
+                            self.layer_manager.maybe_with_layer(
+                                scene,
+                                true,
+                                1.0,
+                                cx.transform,
+                                &cx.frame.border_box_path(),
+                                None,
+                                own_backdrop,
+                                |_| {},
+                            );
+                        }
                         cx.draw_background(scene);
                         cx.draw_inset_box_shadow(scene);
                         cx.draw_table_row_backgrounds(scene);

@@ -5,6 +5,22 @@ use kurbo::{Rect, Vec2};
 use peniko::{Compose, Fill, Mix};
 
 impl ElementCx<'_, '_> {
+    /// The area outer box shadows can paint, with the border box.
+    pub(super) fn outset_box_shadow_extent(&self) -> Rect {
+        let box_shadow = &self.style.get_effects().box_shadow.0;
+        box_shadow.iter().filter(|shadow| !shadow.inset).fold(
+            self.frame.border_box,
+            |prev, shadow| {
+                let x = shadow.base.horizontal.px() as f64 * self.scale;
+                let y = shadow.base.vertical.px() as f64 * self.scale;
+                let blur = shadow.base.blur.px() as f64 * self.scale;
+                let spread = shadow.spread.px() as f64 * self.scale;
+                let offset = (spread + blur * 2.5).max(0.0);
+                prev.union(self.frame.border_box.inflate(offset, offset) + Vec2::new(x, y))
+            },
+        )
+    }
+
     pub(super) fn draw_outset_box_shadow(&self, scene: &mut impl PaintScene) {
         let box_shadow = &self.style.get_effects().box_shadow.0;
         let has_outset_shadow = box_shadow.iter().any(|s| !s.inset);
