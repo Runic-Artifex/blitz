@@ -471,6 +471,40 @@ impl Node {
         Some(self.primary_styles().as_ref()?.clone_display())
     }
 
+    /// Whether this is a `<button>` whose `display` is a flow layout (`block`,
+    /// `inline-block`, `flow-root`, ...). Browsers lay such a button out with
+    /// an anonymous button content box, centred vertically, and (block-level
+    /// in a block container) shrink-to-fit
+    /// (<https://html.spec.whatwg.org/multipage/rendering.html#button-layout>).
+    /// Blitz constructs and lays it out as a flex column that places its
+    /// content as that box would (`StyleFlags::BUTTON_CONTENT_BOX`).
+    pub(crate) fn is_flow_button(&self) -> bool {
+        self.data
+            .downcast_element()
+            .is_some_and(|el| el.name.local == local_name!("button"))
+            && self.display_style().is_some_and(|display| {
+                matches!(
+                    display.inside(),
+                    DisplayInside::Flow | DisplayInside::FlowRoot
+                )
+            })
+    }
+
+    /// The `display` this node's box is constructed and laid out with: its
+    /// computed `display`, except for a flow `<button>` (see [`Self::is_flow_button`]),
+    /// which is a flex container.
+    pub(crate) fn layout_display_style(&self) -> Option<StyloDisplay> {
+        let display = self.display_style()?;
+        if !self.is_flow_button() {
+            return Some(display);
+        }
+        Some(if display.outside() == DisplayOutside::Inline {
+            StyloDisplay::InlineFlex
+        } else {
+            StyloDisplay::Flex
+        })
+    }
+
     pub fn is_or_contains_block(&self) -> bool {
         let style = self.primary_styles();
         let style = style.as_ref();
@@ -1119,6 +1153,27 @@ impl Node {
                 flags |= stylo_taffy::StyleFlags::IS_REPLACED;
             }
         }
+        if self.is_flow_button() {
+            flags |= stylo_taffy::StyleFlags::BUTTON_CONTENT_BOX;
+            // Block-level in a block container: shrink-to-fit. As a flex or
+            // grid item it is sized (and stretched) as any item.
+            let in_block_container = self
+                .layout_parent
+                .get()
+                .and_then(|id| self.tree().get(id))
+                .is_some_and(|parent| {
+                    parent.is_anonymous()
+                        || parent.layout_display_style().is_some_and(|display| {
+                            matches!(
+                                display.inside(),
+                                DisplayInside::Flow | DisplayInside::FlowRoot
+                            )
+                        })
+                });
+            if in_block_container && styles.get_box().display.outside() == DisplayOutside::Block {
+                flags |= stylo_taffy::StyleFlags::FIT_CONTENT_WIDTH;
+            }
+        }
 
         stylo_taffy::TaffyStyloStyle::new(styles, flags)
     }
@@ -1126,8 +1181,8 @@ impl Node {
     /// The node's `display` as a [`taffy::Display`]. Returns [`taffy::Display::Block`]
     /// for nodes without computed styles (e.g. text nodes).
     pub fn taffy_display(&self) -> taffy::Display {
-        self.primary_styles()
-            .map(|s| stylo_taffy::convert::display(s.clone_display()))
+        self.layout_display_style()
+            .map(stylo_taffy::convert::display)
             .unwrap_or(taffy::Display::Block)
     }
 

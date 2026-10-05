@@ -221,6 +221,12 @@ fn text_item_needs_wrap(child_node_kind: NodeKind, _display_outside: DisplayOuts
     child_node_kind == NodeKind::Text
 }
 
+/// Used for the anonymous button content box of a flow `<button>`: every
+/// child is wrapped.
+fn button_content_needs_wrap(_child_node_kind: NodeKind, _display_outside: DisplayOutside) -> bool {
+    true
+}
+
 /// Push a single hoisted child, recursing through display:contents nodes and
 /// wrapping text/inline children per the ancestor container's `WrapContext`.
 fn push_hoisted_child(
@@ -422,7 +428,7 @@ fn collect_layout_children_with_wrap(
     wrap: Option<WrapContext>,
 ) {
     // Record the `display` the box is being constructed with
-    if let Some(display) = doc.nodes[container_node_id].display_style() {
+    if let Some(display) = doc.nodes[container_node_id].layout_display_style() {
         *doc.nodes[container_node_id].display_constructed_as_mut() = display;
     }
 
@@ -515,12 +521,12 @@ fn collect_layout_children_with_wrap(
         }
     }
 
-    let container_display = doc.nodes[container_node_id].display_style().unwrap_or(
-        match doc.nodes[container_node_id].data.kind() {
+    let container_display = doc.nodes[container_node_id]
+        .layout_display_style()
+        .unwrap_or(match doc.nodes[container_node_id].data.kind() {
             NodeKind::AnonymousBlock => Display::Block,
             _ => Display::Inline,
-        },
-    );
+        });
 
     match container_display.inside() {
         DisplayInside::None => {}
@@ -531,6 +537,18 @@ fn collect_layout_children_with_wrap(
             // children THEMSELVES (not their layout children) into the
             // parent, recursing only through nested contents nodes.
             push_hoisted_children_and_pseudos(doc, container_node_id, out, wrap);
+        }
+        // A flow `<button>` (`Node::is_flow_button`): all of its content goes
+        // into one anonymous block, the anonymous button content box, which is
+        // the single item of the flex column the button is laid out as.
+        DisplayInside::Flex if doc.nodes[container_node_id].is_flow_button() => {
+            collect_complex_layout_children(
+                doc,
+                container_node_id,
+                out,
+                false,
+                button_content_needs_wrap,
+            );
         }
         DisplayInside::Flex | DisplayInside::Grid => {
             // ::before/::after pseudos must be checked too: a pseudo with

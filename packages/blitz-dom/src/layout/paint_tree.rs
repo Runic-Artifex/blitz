@@ -252,7 +252,7 @@ impl BaseDocument {
             }
         }
 
-        let Some(display) = self.nodes[node_id].display_style() else {
+        let Some(display) = self.nodes[node_id].layout_display_style() else {
             return;
         };
 

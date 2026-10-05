@@ -20,6 +20,16 @@ bitflags! {
     pub struct StyleFlags: u8 {
         /// Whether the node is a replaced element (e.g. an image or form control)
         const IS_REPLACED = 1 << 0;
+        /// A `<button>` whose `display` is a flow layout (`block`,
+        /// `inline-block`, `flow-root`): browsers lay its content out in an
+        /// anonymous button content box that fills it and is centred
+        /// vertically (<https://html.spec.whatwg.org/multipage/rendering.html#button-layout>).
+        /// It is laid out as a nowrap flex column with `justify-content: safe center`
+        /// and `align-items: stretch`, which places the content as that box would.
+        const BUTTON_CONTENT_BOX = 1 << 1;
+        /// An `auto` width is used as `fit-content` (a block-level button in a
+        /// block container is shrink-to-fit).
+        const FIT_CONTENT_WIDTH = 1 << 2;
     }
 }
 
@@ -69,7 +79,8 @@ impl<T: Deref<Target = ComputedValues>> taffy::CoreStyle for TaffyStyloStyle<T> 
 
     #[inline]
     fn is_block(&self) -> bool {
-        convert::is_block(self.style.get_box().display)
+        !self.flags.contains(StyleFlags::BUTTON_CONTENT_BOX)
+            && convert::is_block(self.style.get_box().display)
     }
 
     #[inline]
@@ -125,8 +136,13 @@ impl<T: Deref<Target = ComputedValues>> taffy::CoreStyle for TaffyStyloStyle<T> 
     #[inline]
     fn size(&self) -> taffy::Size<taffy::Dimension> {
         let position_styles = self.style.get_position();
+        let width = convert::dimension(&position_styles.width);
         taffy::Size {
-            width: convert::dimension(&position_styles.width),
+            width: if self.flags.contains(StyleFlags::FIT_CONTENT_WIDTH) && width.is_auto() {
+                taffy::Dimension::fit_content()
+            } else {
+                width
+            },
             height: convert::dimension(&position_styles.height),
         }
     }
@@ -243,11 +259,17 @@ impl<T: Deref<Target = ComputedValues>> taffy::BlockItemStyle for TaffyStyloStyl
 impl<T: Deref<Target = ComputedValues>> taffy::FlexboxContainerStyle for TaffyStyloStyle<T> {
     #[inline]
     fn flex_direction(&self) -> taffy::FlexDirection {
+        if self.flags.contains(StyleFlags::BUTTON_CONTENT_BOX) {
+            return taffy::FlexDirection::Column;
+        }
         convert::flex_direction(self.style.get_position().flex_direction)
     }
 
     #[inline]
     fn flex_wrap(&self) -> taffy::FlexWrap {
+        if self.flags.contains(StyleFlags::BUTTON_CONTENT_BOX) {
+            return taffy::FlexWrap::NoWrap;
+        }
         convert::flex_wrap(self.style.get_position().flex_wrap)
     }
 
@@ -258,6 +280,9 @@ impl<T: Deref<Target = ComputedValues>> taffy::FlexboxContainerStyle for TaffySt
 
     #[inline]
     fn gap(&self) -> taffy::Size<taffy::LengthPercentage> {
+        if self.flags.contains(StyleFlags::BUTTON_CONTENT_BOX) {
+            return taffy::Size::zero();
+        }
         let position_styles = self.style.get_position();
         taffy::Size {
             width: convert::gap(&position_styles.column_gap),
@@ -267,6 +292,9 @@ impl<T: Deref<Target = ComputedValues>> taffy::FlexboxContainerStyle for TaffySt
 
     #[inline]
     fn align_content(&self) -> Option<taffy::AlignContent> {
+        if self.flags.contains(StyleFlags::BUTTON_CONTENT_BOX) {
+            return None;
+        }
         convert::content_alignment(
             self.style.get_position().align_content,
             self.style.clone_display(),
@@ -275,11 +303,17 @@ impl<T: Deref<Target = ComputedValues>> taffy::FlexboxContainerStyle for TaffySt
 
     #[inline]
     fn align_items(&self) -> Option<taffy::AlignItems> {
+        if self.flags.contains(StyleFlags::BUTTON_CONTENT_BOX) {
+            return Some(taffy::AlignItems::STRETCH);
+        }
         convert::default_item_alignment(self.style.get_position().align_items.0, false)
     }
 
     #[inline]
     fn justify_content(&self) -> Option<taffy::JustifyContent> {
+        if self.flags.contains(StyleFlags::BUTTON_CONTENT_BOX) {
+            return Some(taffy::JustifyContent::SAFE_CENTER);
+        }
         let position_styles = self.style.get_position();
         convert::justify_content(
             position_styles.justify_content,

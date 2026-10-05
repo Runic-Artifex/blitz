@@ -125,6 +125,18 @@ input[type="button"] {
     color: black;
     background-color: #EFEFEF;
     text-align: center;
+}
+
+/* A <button> is an inline-block, as in browsers: its content is centred by
+ * the button layout (Node::is_flow_button), and an author `display: flex` or
+ * `grid` lays it out without UA alignment. */
+button {
+    display: inline-block;
+}
+
+input[type="submit"],
+input[type="reset"],
+input[type="button"] {
     display: inline-flex;
     align-items: center;
     justify-content: center;
