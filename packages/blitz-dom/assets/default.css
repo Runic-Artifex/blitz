@@ -97,6 +97,15 @@ textarea {
     font-family: monospace;
 }
 
+/* Form controls do not inherit the line height: Chromium's UA font
+ * (`font: -webkit-small-control`) and Gecko's forms.css reset it. */
+input,
+textarea,
+select,
+button {
+    line-height: normal;
+}
+
 input:focus,
 textarea:focus {
     outline: 2px solid #4D90FE;
