@@ -339,7 +339,7 @@ impl BaseDocument {
                             );
                         }
                         None | Some("text" | "password" | "email" | "tel" | "url" | "search") => {
-                            return compute_leaf_layout(
+                            let mut output = compute_leaf_layout(
                                 inputs,
                                 &node.layout_style(),
                                 resolve_calc_value,
@@ -352,6 +352,13 @@ impl BaseDocument {
                                     height: resolved_line_height.unwrap_or(16.0),
                                 },
                             );
+                            output.baselines.first = text_input_baseline(
+                                node,
+                                self.viewport.scale(),
+                                output.size,
+                                inputs.parent_size.width,
+                            );
+                            return output;
                         }
                         _ => {}
                     }
@@ -873,4 +880,29 @@ impl Iterator for RefCellChildIter<'_> {
             taffy_node_id(*id)
         })
     }
+}
+
+/// The baseline of a single-line text input: its editor's line's, with the line
+/// centred in the content box as it is painted (`Node::text_input_v_centering_offset`)
+/// and as Chromium centres the inner editor. Without it the input sat on a line with
+/// its bottom edge, which made a line holding it taller by the line's descent.
+fn text_input_baseline(
+    node: &Node,
+    scale: f32,
+    size: taffy::Size<f32>,
+    parent_width: Option<f32>,
+) -> Option<f32> {
+    let input = node.element_data()?.text_input_data()?;
+    let line = input.editor.try_layout()?.lines().next()?;
+    let style = node.layout_style();
+    let pb = style
+        .padding()
+        .resolve_or_zero(parent_width, resolve_calc_value)
+        + style
+            .border()
+            .resolve_or_zero(parent_width, resolve_calc_value);
+    let content_height = size.height - pb.vertical_axis_sum();
+    let editor_height = input.editor.try_layout()?.height() / scale;
+    let offset = ((content_height - editor_height) / 2.0).max(0.0);
+    Some(pb.top + offset + line.metrics().baseline / scale)
 }
