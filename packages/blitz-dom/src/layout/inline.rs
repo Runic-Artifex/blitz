@@ -399,8 +399,18 @@ impl BaseDocument {
                         .resolve_or_zero(parent_width, resolve_calc_value)
                         .bottom
             });
-            let box_inputs = inline_box_inputs(style.size().width, margin, child_inputs);
+            let mut box_inputs = inline_box_inputs(style.size().width, margin, child_inputs);
             drop(style);
+            // The line's height depends on the boxes' baselines, which Taffy's flex and grid
+            // layouts (and a button's content box) give only when they lay the box out. When
+            // the line is measured, the box is therefore laid out in full, as Taffy does for
+            // items aligned on baselines. A width-only measurement needs no baselines.
+            if box_inputs.run_mode == RunMode::ComputeSize
+                && box_inputs.axis != RequestedAxis::Horizontal
+            {
+                box_inputs.run_mode = RunMode::PerformLayout;
+                box_inputs.axis = RequestedAxis::Both;
+            }
 
             if is_out_of_flow || is_floated {
                 ibox.width = 0.0;
