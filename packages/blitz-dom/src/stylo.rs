@@ -1252,12 +1252,25 @@ impl<'a> TElement for BlitzNode<'a> {
         &self.element_data().expect("Not an element").name.ns
     }
 
+    /// The content-box size of a query container from its last layout
+    /// (`BaseDocument::update_container_sizes`); unknown before its first layout and
+    /// for boxes size containment does not apply to (non-atomic inlines, `display:
+    /// none` or `contents`).
     fn query_container_size(
         &self,
-        _display: &style::values::specified::Display,
+        display: &style::values::specified::Display,
     ) -> euclid::default::Size2D<Option<app_units::Au>> {
-        // FIXME: Implement container queries. For now this effectively disables them without panicking.
-        Default::default()
+        use style::values::specified::box_::{DisplayInside, DisplayOutside};
+        let no_box = display.is_none() || display.is_contents();
+        let non_atomic_inline =
+            display.outside() == DisplayOutside::Inline && display.inside() == DisplayInside::Flow;
+        match self.container_size.get() {
+            Some((width, height)) if !no_box && !non_atomic_inline => euclid::default::Size2D::new(
+                Some(app_units::Au::from_f32_px(width)),
+                Some(app_units::Au::from_f32_px(height)),
+            ),
+            _ => euclid::default::Size2D::new(None, None),
+        }
     }
 
     fn each_custom_state<F>(&self, _callback: F)

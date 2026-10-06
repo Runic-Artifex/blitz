@@ -115,7 +115,11 @@ impl<T: Deref<Target = ComputedValues>> taffy::CoreStyle for TaffyStyloStyle<T> 
     #[inline]
     fn contain(&self) -> taffy::Contain {
         let box_styles = self.style.get_box();
-        convert::contain(box_styles.contain, box_styles.display)
+        convert::contain(
+            box_styles.contain,
+            box_styles.container_type,
+            box_styles.display,
+        )
     }
 
     #[inline]

@@ -33,7 +33,43 @@ use crate::{
     node::TextBrush,
 };
 
+/// Restyle and layout passes per resolve for container queries (nested containers).
+const MAX_CONTAINER_QUERY_PASSES: usize = 4;
+
 impl BaseDocument {
+    /// Record the content-box size of each size query container after layout
+    /// (`Node::container_size`) and restyle the descendants of those whose size changed
+    /// (or that stopped being containers). Returns whether any changed.
+    fn update_container_sizes(&mut self) -> bool {
+        use style::values::specified::box_::ContainerType;
+        let mut changed = vec![];
+        for (id, node) in self.nodes.iter() {
+            if !node.flags.is_in_document() {
+                continue;
+            }
+            let is_container = node.primary_styles().is_some_and(|style| {
+                style
+                    .get_box()
+                    .clone_container_type()
+                    .intersects(ContainerType::SIZE | ContainerType::INLINE_SIZE)
+            });
+            let size = is_container.then(|| {
+                let layout = node.final_layout();
+                (layout.content_box_width(), layout.content_box_height())
+            });
+            if node.container_size.get() != size {
+                node.container_size.set(size);
+                changed.push(id);
+            }
+        }
+        for id in &changed {
+            self.nodes[*id].set_restyle_hint(
+                style::invalidation::element::restyle_hints::RestyleHint::RESTYLE_DESCENDANTS,
+            );
+        }
+        !changed.is_empty()
+    }
+
     /// Restyle the tree and then relayout it
     pub fn resolve(&mut self, current_time_for_animations: f64) {
         if TDocument::as_node(&self.root_node())
@@ -111,6 +147,27 @@ impl BaseDocument {
         self.resolve_layout();
         timer.record_time("layout");
         self.nodes.bump_geometry_generation();
+
+        // Container queries evaluate against their container's size in the last layout:
+        // when a query container's size changed, its descendants are restyled and the
+        // document is laid out again. A size container's size does not depend on its
+        // contents, so this settles in as many passes as containers are nested.
+        for _ in 0..MAX_CONTAINER_QUERY_PASSES {
+            if !self.update_container_sizes() {
+                break;
+            }
+            self.resolve_stylist(current_time_for_animations);
+            if !self.incremental_layout {
+                self.mark_all_damaged();
+            }
+            self.propagate_damage_flags(root_node_id);
+            self.resolve_layout_children();
+            self.resolve_deferred_tasks();
+            self.flush_pending_style_images();
+            self.resolve_layout();
+            self.nodes.bump_geometry_generation();
+        }
+        timer.record_time("containers");
 
         // Resolve transforms
         self.resolve_transforms(root_node_id);

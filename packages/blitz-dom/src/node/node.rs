@@ -117,6 +117,10 @@ pub struct Node {
     /// stacking context on its last (non-skipped) paint-tree build. Replayed
     /// when the subtree is skipped as clean. Empty for stacking-context roots.
     pub sc_contribution_cache: RefCell<ThinVec<HoistedPaintChild>>,
+    /// For a size query container (`container-type: size | inline-size`), the content-box
+    /// width and height of its last layout, which container queries evaluate against
+    /// (`None` before its first layout: queries on it are unknown).
+    pub container_size: Cell<Option<(f32, f32)>>,
 
     // Flags
     pub flags: NodeFlags,
@@ -414,6 +418,7 @@ impl Node {
             paint_children: RefCell::new(None),
             stacking_context: None,
             sc_contribution_cache: RefCell::new(ThinVec::new()),
+            container_size: Cell::new(None),
 
             flags: NodeFlags::empty(),
             data,

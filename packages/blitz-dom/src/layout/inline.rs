@@ -2,10 +2,7 @@ use blitz_traits::node_id::NodeId;
 use markup5ever::local_name;
 use parley::{AlignmentOptions, BreakReason, IndentOptions};
 use style::values::specified::box_::{DisplayInside, DisplayOutside};
-use style::values::{
-    computed::{CSSPixelLength, Contain},
-    generics::text::GenericTextIndent,
-};
+use style::values::{computed::CSSPixelLength, generics::text::GenericTextIndent};
 use taffy::{
     AvailableSpace, AxisStaticEdge, AxisStaticPosition, BlockContext, BlockFormattingContext,
     BoxSizing, CollapsibleMarginSet, CompactLength, CoreStyle as _, Direction, LayoutInput,
@@ -386,7 +383,8 @@ impl BaseDocument {
             );
             let is_scroll_container = !matches!(overflow.y, Overflow::Visible | Overflow::Clip);
             let is_block_axis_scroll_container = is_flow && is_scroll_container && !is_button;
-            let contain_layout = box_style.clone_contain().contains(Contain::LAYOUT);
+            // (`contain: layout`, or a size query container.)
+            let contain_layout = style.contain().contains(taffy::Contain::LAYOUT);
             let exports_baseline = !is_block_axis_scroll_container && !contain_layout;
             let content_box_bottom_inset = is_button.then(|| {
                 let parent_width = inputs.parent_size.width;

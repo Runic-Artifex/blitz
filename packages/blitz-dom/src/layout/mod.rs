@@ -15,10 +15,10 @@ use style::values::computed::length_percentage::CalcLengthPercentage;
 use stylo_taffy::TaffyStyloStyle;
 use taffy::{
     AxisStaticEdge, AxisStaticPosition, BlockContext, CoreStyle as _, DetailedLayoutInfo,
-    FlexDirection, LayoutContainingBlock, LayoutPartialTree, NodeId, OofCandidate, ResolveOrZero,
-    RoundTree, RunMode, TraversePartialTree, TraverseTree, compute_block_layout,
-    compute_cached_layout, compute_flexbox_layout, compute_grid_layout, compute_leaf_layout,
-    compute_oof_layout, prelude::*,
+    FlexDirection, LayoutContainingBlock, LayoutPartialTree, MaybeMath as _, MaybeResolve as _,
+    NodeId, OofCandidate, ResolveOrZero, RoundTree, RunMode, TraversePartialTree, TraverseTree,
+    compute_block_layout, compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
+    compute_leaf_layout, compute_oof_layout, prelude::*,
 };
 
 pub(crate) mod construct;
@@ -85,6 +85,69 @@ impl BaseDocument {
 }
 
 impl BaseDocument {
+    /// Inline-size containment (a size query container, `container-type: size |
+    /// inline-size`): the box's intrinsic inline size is that of an empty box
+    /// (css-contain-2 §3.2, css-sizing-4 §4.1), so a min- or max-content measurement of
+    /// an `auto` width lays it out at its padding and border, within its min and max
+    /// widths. Taffy does not implement size containment.
+    fn inline_size_contained_inputs(
+        &self,
+        node_id: NodeId,
+        mut inputs: taffy::tree::LayoutInput,
+    ) -> taffy::tree::LayoutInput {
+        use style::values::specified::box_::ContainerType;
+        if inputs.known_dimensions.width.is_some()
+            || !matches!(
+                inputs.available_space.width,
+                AvailableSpace::MinContent | AvailableSpace::MaxContent
+            )
+        {
+            return inputs;
+        }
+        let node = &self.nodes[dom_node_id(node_id)];
+        let contained = node.primary_styles().is_some_and(|style| {
+            style
+                .get_box()
+                .clone_container_type()
+                .intersects(ContainerType::SIZE | ContainerType::INLINE_SIZE)
+        });
+        if !contained {
+            return inputs;
+        }
+        let style = node.layout_style();
+        if !style.size().width.is_auto() {
+            return inputs;
+        }
+        let parent_width = inputs.parent_size.width;
+        let pb = style
+            .padding()
+            .resolve_or_zero(parent_width, resolve_calc_value)
+            .horizontal_axis_sum()
+            + style
+                .border()
+                .resolve_or_zero(parent_width, resolve_calc_value)
+                .horizontal_axis_sum();
+        // Min and max widths as border-box widths.
+        let border_box = |width: Option<f32>| match style.box_sizing() {
+            taffy::BoxSizing::ContentBox => width.map(|w| w + pb),
+            taffy::BoxSizing::BorderBox => width,
+        };
+        let min = border_box(
+            style
+                .min_size()
+                .width
+                .maybe_resolve(parent_width, resolve_calc_value),
+        );
+        let max = border_box(
+            style
+                .max_size()
+                .width
+                .maybe_resolve(parent_width, resolve_calc_value),
+        );
+        inputs.known_dimensions.width = Some(pb.maybe_min(max).maybe_max(min));
+        inputs
+    }
+
     /// The baselines of a flow `<button>` (`Node::is_flow_button`), laid out as a
     /// flex column around its anonymous button content box: those of the content
     /// box, as Chromium's LayoutButton exports them. The first baseline is the
@@ -93,12 +156,12 @@ impl BaseDocument {
     /// last line. Layout containment suppresses both.
     fn button_content_baselines(&self, node_id: NodeId) -> taffy::Baselines {
         let node = &self.nodes[dom_node_id(node_id)];
-        let contain_layout = node.primary_styles().is_some_and(|style| {
-            style
-                .get_box()
-                .clone_contain()
-                .contains(style::values::computed::Contain::LAYOUT)
-        });
+        // (`contain: layout`, or a size query container.)
+        let contain_layout = node.primary_styles().is_some()
+            && node
+                .layout_style()
+                .contain()
+                .contains(taffy::Contain::LAYOUT);
         if contain_layout {
             return taffy::Baselines::NONE;
         }
@@ -194,6 +257,7 @@ impl BaseDocument {
         inputs: taffy::tree::LayoutInput,
         block_ctx: Option<&mut BlockContext<'_>>,
     ) -> taffy::tree::LayoutOutput {
+        let inputs = self.inline_size_contained_inputs(node_id, inputs);
         let mut output = self.dispatch_child_layout(node_id, inputs, block_ctx);
         if inputs.run_mode == RunMode::PerformLayout {
             compute_oof_layout(self, node_id, &mut output);

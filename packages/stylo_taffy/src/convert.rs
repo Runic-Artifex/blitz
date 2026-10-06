@@ -368,8 +368,16 @@ pub fn overflow(input: stylo::Overflow) -> taffy::Overflow {
     }
 }
 
+/// The containment of a box: its `contain` and the layout containment a size query
+/// container (`container-type: size | inline-size`) applies
+/// (<https://drafts.csswg.org/css-conditional-5/#container-type>).
 #[inline]
-pub fn contain(input: stylo::Contain, display: stylo::Display) -> taffy::Contain {
+pub fn contain(
+    input: stylo::Contain,
+    container_type: style::values::specified::box_::ContainerType,
+    display: stylo::Display,
+) -> taffy::Contain {
+    use style::values::specified::box_::ContainerType;
     // Layout and paint containment do not apply to non-atomic inline-level boxes
     // (https://drafts.csswg.org/css-contain-1/#containment-layout)
     if display.outside() == stylo::DisplayOutside::Inline
@@ -378,6 +386,9 @@ pub fn contain(input: stylo::Contain, display: stylo::Display) -> taffy::Contain
         return taffy::Contain::NONE;
     }
     let mut result = taffy::Contain::NONE;
+    if container_type.intersects(ContainerType::SIZE | ContainerType::INLINE_SIZE) {
+        result |= taffy::Contain::LAYOUT;
+    }
     if input.contains(stylo::Contain::LAYOUT) {
         result |= taffy::Contain::LAYOUT;
     }
@@ -850,7 +861,11 @@ pub fn to_taffy_style(style: &stylo::ComputedValues) -> taffy::Style<Atom> {
         },
         direction: self::direction(style.clone_direction()),
         scrollbar_width: 0.0,
-        contain: self::contain(style.clone_contain(), style.clone_display()),
+        contain: self::contain(
+            style.clone_contain(),
+            style.clone_container_type(),
+            style.clone_display(),
+        ),
 
         #[cfg(feature = "floats")]
         float: self::float(style.clone_float()),
