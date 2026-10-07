@@ -348,8 +348,13 @@ pub(crate) fn white_space_collapse(input: stylo::WhiteSpaceCollapse) -> parley::
 /// Map the css-inline-3 `alignment-baseline` and `baseline-shift` longhands (which Stylo
 /// stores in place of the `vertical-align` shorthand) to Parley's `VerticalAlign`.
 ///
-/// Percentages are resolved against the element's own `line-height`.
-pub(crate) fn vertical_align(style: &stylo::ComputedValues) -> parley::VerticalAlign {
+/// Percentages are resolved against the element's own `line-height`. `sub` and `super`
+/// shift by a fifth and a third of the parent's font size plus one pixel, as Blink does
+/// (`parent_font_size`; without it, Parley's shifts, which leave out the pixel).
+pub(crate) fn vertical_align(
+    style: &stylo::ComputedValues,
+    parent_font_size: Option<f32>,
+) -> parley::VerticalAlign {
     let box_styles = style.get_box();
     let alignment = match box_styles.clone_alignment_baseline() {
         stylo::AlignmentBaseline::Baseline => parley::AlignmentBaseline::Baseline,
@@ -358,12 +363,15 @@ pub(crate) fn vertical_align(style: &stylo::ComputedValues) -> parley::VerticalA
         stylo::AlignmentBaseline::Middle => parley::AlignmentBaseline::Middle,
     };
     let shift = match box_styles.clone_baseline_shift() {
-        stylo::BaselineShift::Keyword(stylo::BaselineShiftKeyword::Sub) => {
-            parley::BaselineShift::Sub
-        }
-        stylo::BaselineShift::Keyword(stylo::BaselineShiftKeyword::Super) => {
-            parley::BaselineShift::Super
-        }
+        stylo::BaselineShift::Keyword(stylo::BaselineShiftKeyword::Sub) => match parent_font_size {
+            Some(size) => parley::BaselineShift::Length(-(size / 5.0 + 1.0)),
+            None => parley::BaselineShift::Sub,
+        },
+        stylo::BaselineShift::Keyword(stylo::BaselineShiftKeyword::Super) => match parent_font_size
+        {
+            Some(size) => parley::BaselineShift::Length(size / 3.0 + 1.0),
+            None => parley::BaselineShift::Super,
+        },
         stylo::BaselineShift::Keyword(stylo::BaselineShiftKeyword::Top) => {
             parley::BaselineShift::Top
         }
@@ -399,6 +407,7 @@ pub(crate) fn vertical_align(style: &stylo::ComputedValues) -> parley::VerticalA
 pub(crate) fn style(
     span_id: NodeId,
     style: &stylo::ComputedValues,
+    parent_font_size: Option<f32>,
 ) -> parley::TextStyle<'static, 'static, TextBrush> {
     let font_styles = style.get_font();
     let itext_styles = style.get_inherited_text();
@@ -410,7 +419,7 @@ pub(crate) fn style(
         stylo::LineHeight::Number(num) => parley::LineHeight::FontSizeRelative(num.0),
         stylo::LineHeight::Length(value) => parley::LineHeight::Absolute(value.0.px()),
     };
-    let vertical_align = self::vertical_align(style);
+    let vertical_align = self::vertical_align(style, parent_font_size);
 
     let letter_spacing = itext_styles
         .letter_spacing

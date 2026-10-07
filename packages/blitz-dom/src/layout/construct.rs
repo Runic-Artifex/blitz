@@ -906,7 +906,10 @@ fn placeholder_style(
     )?;
 
     let color = styles.get_inherited_text().color.as_color_color();
-    Some((stylo_to_parley::style(input_element_id, &styles), color))
+    Some((
+        stylo_to_parley::style(input_element_id, &styles, None),
+        color,
+    ))
 }
 
 fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multiline: bool) {
@@ -914,7 +917,7 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
     let parley_style = node
         .primary_styles()
         .as_ref()
-        .map(|s| stylo_to_parley::style(node.id, s))
+        .map(|s| stylo_to_parley::style(node.id, s, None))
         .unwrap_or_default();
     let alignment = node
         .primary_styles()
@@ -1126,6 +1129,14 @@ pub(crate) fn find_inline_layout_embedded_boxes(
     }
 }
 
+/// The used font size of a node's parent (for `vertical-align: sub` and `super`).
+fn parent_font_size(nodes: &crate::NodeTree, node: &crate::Node) -> Option<f32> {
+    let parent = nodes.get(node.parent?)?;
+    parent
+        .primary_styles()
+        .map(|s| s.get_font().font_size.used_size.0.px())
+}
+
 pub(crate) fn build_inline_layout_into(
     nodes: &crate::NodeTree,
     layout_ctx: &mut LayoutContext<TextBrush>,
@@ -1144,7 +1155,7 @@ pub(crate) fn build_inline_layout_into(
 
     let parley_style = root_node_style
         .as_ref()
-        .map(|s| stylo_to_parley::style(inline_context_root_node_id, s))
+        .map(|s| stylo_to_parley::style(inline_context_root_node_id, s, None))
         .unwrap_or_else(|| parley::TextStyle {
             white_space_collapse: WhiteSpaceCollapse::Collapse,
             ..Default::default()
@@ -1284,7 +1295,12 @@ pub(crate) fn build_inline_layout_into(
                                 baseline: None,
                                 vertical_align: node
                                     .primary_styles()
-                                    .map(|s| stylo_to_parley::vertical_align(&s))
+                                    .map(|s| {
+                                        stylo_to_parley::vertical_align(
+                                            &s,
+                                            parent_font_size(nodes, node),
+                                        )
+                                    })
                                     .unwrap_or_default(),
                             });
                         } else if *tag_name == local_name!("br") {
@@ -1301,7 +1317,13 @@ pub(crate) fn build_inline_layout_into(
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                             let style = node
                                 .primary_styles()
-                                .map(|s| stylo_to_parley::style(node.id, &s))
+                                .map(|s| {
+                                    stylo_to_parley::style(
+                                        node.id,
+                                        &s,
+                                        parent_font_size(nodes, node),
+                                    )
+                                })
                                 .unwrap_or_else(|| parley::TextStyle {
                                     white_space_collapse: WhiteSpaceCollapse::Collapse,
                                     ..Default::default()
@@ -1351,7 +1373,12 @@ pub(crate) fn build_inline_layout_into(
                             baseline: None,
                             vertical_align: node
                                 .primary_styles()
-                                .map(|s| stylo_to_parley::vertical_align(&s))
+                                .map(|s| {
+                                    stylo_to_parley::vertical_align(
+                                        &s,
+                                        parent_font_size(nodes, node),
+                                    )
+                                })
                                 .unwrap_or_default(),
                         });
                     }
