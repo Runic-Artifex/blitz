@@ -46,7 +46,7 @@ a {
 }
 
 /* https://html.spec.whatwg.org/#bidi-rendering */
-input[type=tel]:dir(ltr) {
+input[type=tel i]:dir(ltr) {
     direction: ltr;
 }
 
@@ -76,14 +76,14 @@ svg|*:not(svg|foreignObject) > svg|svg {
     transform-origin: 0 0;
 }
 
-input[type="checkbox"] {
+input[type="checkbox" i] {
     box-sizing: border-box;
     width: 13px;
     height: 13px;
     margin: 3px 3px 3px 4px;
 }
 
-input[type="radio"] {
+input[type="radio" i] {
     box-sizing: border-box;
     width: 13px;
     height: 13px;
@@ -99,14 +99,24 @@ input[type="email" i],
 input[type="tel" i],
 input[type="url" i],
 input[type="search" i] {
-    box-sizing: border-box;
+    /* Blink's automatic text-field appearance uses a content box. Author
+     * `box-sizing` declarations still win in the normal cascade. */
+    box-sizing: content-box;
     border: 2px inset #767676;
     padding: 1px 2px;
     background-color: white;
 }
 
-textarea {
+/* Blink has an explicit border-box exception for search controls. */
+input[type="search" i] {
     box-sizing: border-box;
+}
+
+textarea {
+    /* Native textarea sizing is content-box; this is distinct from checkable
+     * inputs and button controls, which retain their border-box UA sizing. */
+    box-sizing: content-box;
+    display: inline-block;
     border: 1px solid #767676;
     padding: 2px;
     background-color: white;
@@ -137,8 +147,8 @@ button:focus-visible {
     outline: auto 1px light-dark(#101010, #eeeeee);
 }
 
-input[type="checkbox"]:focus-visible,
-input[type="radio"]:focus-visible {
+input[type="checkbox" i]:focus-visible,
+input[type="radio" i]:focus-visible {
     outline-offset: 2px;
 }
 
@@ -147,10 +157,13 @@ input[type="radio"]:focus-visible {
 }
 
 button,
-input[type="submit"],
-input[type="reset"],
-input[type="button"] {
-    border: 1px solid #999;
+input[type="submit" i],
+input[type="reset" i],
+input[type="button" i] {
+    /* Chromium html.css: the native button group is border-box with a two
+     * pixel outset ButtonBorder. #767676 is the Linux ButtonBorder colour. */
+    box-sizing: border-box;
+    border: 2px outset #767676;
     border-radius: 1px;
     padding: 1px 6px;
     color: black;
@@ -165,9 +178,9 @@ button {
     display: inline-block;
 }
 
-input[type="submit"],
-input[type="reset"],
-input[type="button"] {
+input[type="submit" i],
+input[type="reset" i],
+input[type="button" i] {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -177,13 +190,13 @@ input[type="button"] {
  * produce a scrolling mechanism. This matches the UA stylesheet mandated by
  * the HTML standard (https://html.spec.whatwg.org/#form-controls) and prevents
  * an over-long value label from contributing overflow to the page. */
-input[type="submit"],
-input[type="reset"],
-input[type="button"] {
+input[type="submit" i],
+input[type="reset" i],
+input[type="button" i] {
     overflow: clip !important;
 }
 
-input[type="file"] {
+input[type="file" i] {
     border: none;
     padding: 0;
     background-color: transparent;
@@ -858,7 +871,7 @@ hr[size="1"] {
  * broken. But non-broken images/inputs will have a replaced box, and thus we
  * won't we don't generate the pseudo-element anyways. This prevents
  * unnecessary reframing when images become broken / non-broken. */
-input[type=image]::before,
+input[type=image i]::before,
 img::before {
     content: -moz-alt-content !important;
     unicode-bidi: isolate;
