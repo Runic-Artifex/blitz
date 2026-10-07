@@ -428,6 +428,12 @@ impl BaseDocument {
             if !node.flags.contains(NodeFlags::IS_IN_DOCUMENT) {
                 continue;
             }
+            // An element without styles is inside a `display: none` subtree,
+            // which generates no boxes: its layout children are left from
+            // before and are collected again once it is styled.
+            if !node.is_anonymous() && node.is_element() && node.primary_styles().is_none() {
+                continue;
+            }
             let Some(children) = node.layout_children.borrow().clone() else {
                 continue;
             };
