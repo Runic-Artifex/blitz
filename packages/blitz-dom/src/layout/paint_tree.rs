@@ -56,7 +56,7 @@ pub fn hoisted_child_position(tree: &NodeTree, sc_root_id: NodeId, child_id: Nod
         let Some(node) = tree.get(id) else {
             break;
         };
-        let location = node.final_layout().location;
+        let location = node.visual_location();
         let scroll_offset = *node.scroll_offset();
         position.x += location.x - scroll_offset.x as f32;
         position.y += location.y - scroll_offset.y as f32;
@@ -102,6 +102,17 @@ impl HoistedPaintChild {
     pub fn position_is_cached(&self, tree: &NodeTree) -> bool {
         self.position.get().0 == tree.geometry_generation()
     }
+
+    /// Overflow clips crossed when lifting a positioned descendant into its
+    /// stacking context. Lifting paint order must not lift it out of these clips.
+    pub fn clip_ancestors(&self, tree: &NodeTree, sc_root_id: NodeId) -> Vec<NodeId> {
+        std::iter::successors(tree[self.node_id].containing_block(), |id| {
+            tree[*id].containing_block()
+        })
+        .take_while(|id| *id != sc_root_id)
+        .filter(|id| !tree[*id].is_anonymous() && tree[*id].clips_overflow())
+        .collect()
+    }
 }
 
 #[derive(Debug)]
@@ -146,7 +157,7 @@ impl StackingContext {
         let child_rect = |child: &HoistedPaintChild| -> Rect<f32> {
             let node = &tree[child.node_id];
             let position = child.position(tree, sc_root_id);
-            let location = node.final_layout().location;
+            let location = node.visual_location();
             let mut overflow = *node.scrollable_overflow();
             if let Some(transform) = node.transform().as_deref() {
                 overflow = transform.transform_rect_bbox(overflow);
@@ -335,11 +346,17 @@ impl BaseDocument {
                         },
                     );
 
-                    // Only stacking contexts with a non-zero z-index are lifted
-                    // out of tree order into the enclosing stacking context's
-                    // z-sorted list (CSS 2.1 Appendix E).
+                    // Positioned stacking contexts, including sticky/fixed
+                    // boxes with auto z-index, paint at their enclosing
+                    // context's positioned level rather than inside a row or
+                    // other normal-flow ancestor. Preserve intervening clips.
                     let z_index = self.nodes[child_id].z_index();
-                    if is_sc_root && z_index != 0 {
+                    let positioned = self.nodes[child_id]
+                        .primary_styles()
+                        .is_some_and(|s| s.get_box().position != Position::Static);
+                    if is_sc_root
+                        && (z_index != 0 || positioned || self.nodes[child_id].has_css_transform())
+                    {
                         entries.push(HoistedPaintChild::new(child_id, z_index))
                     } else {
                         paint_children.push(child_id);
@@ -445,6 +462,18 @@ fn node_to_paint_order(node: &Node, is_flex_or_grid: bool) -> (i32, i32) {
         return (0, 0);
     };
     let position = style.clone_position();
+    // CSS Transforms paints a transformed box at the positioned auto/zero
+    // level, even when its normal-flow `position` is static.
+    if node.has_css_transform() {
+        return (
+            2,
+            if is_flex_or_grid {
+                style.clone_order()
+            } else {
+                0
+            },
+        );
+    }
     if is_flex_or_grid {
         match position {
             Position::Static => (0, style.clone_order()),

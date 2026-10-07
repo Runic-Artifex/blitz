@@ -113,6 +113,7 @@ impl BaseDocument {
         // Apply any device changes (viewport resize, zoom, color-scheme, etc)
         // accumulated since the last resolve as a single device rebuild.
         self.flush_pending_device_changes();
+        let scroll_anchors = self.capture_scroll_anchors();
 
         // we need to resolve stylist first since it will need to drive our layout bits
         self.resolve_stylist(current_time_for_animations);
@@ -171,6 +172,8 @@ impl BaseDocument {
 
         // Resolve transforms
         self.resolve_transforms(root_node_id);
+        self.apply_scroll_anchors(scroll_anchors);
+        self.clamp_scroll_offsets();
         timer.record_time("transform");
 
         // Build paint children / stacking contexts for damaged subtrees. Runs

@@ -1044,6 +1044,17 @@ pub(crate) fn compute_table_layout(
                     maxs[i] = maxs[i].max(mins[i]);
                 }
             }
+            // A percentage column may be held above its requested share by
+            // intrinsic content. Distribute the resulting over-constraint
+            // across the other tracks' shrinkable range, rather than letting
+            // the grid solver truncate the final column.
+            let assigned: f32 = maxs.iter().sum();
+            if assigned > target && assigned > min {
+                let fraction = (target - min) / (assigned - min);
+                for i in 0..n {
+                    maxs[i] = mins[i] + (maxs[i] - mins[i]) * fraction;
+                }
+            }
         } else if target < max && max > min {
             let fraction = (target - min) / (max - min);
             for i in 0..n {
@@ -1081,6 +1092,65 @@ pub(crate) fn compute_table_layout(
     if n == 0 {
         style.padding = taffy::Rect::ZERO.map(style_helpers::length);
         inputs.known_dimensions.width = Some(inputs.known_dimensions.width.unwrap_or(caption_min));
+    }
+    // Parent formatting contexts size the table wrapper, which includes its
+    // captions. Grid tracks occupy only the table grid. In particular flex/grid
+    // stretch feeds the wrapper's measured height back as a known dimension.
+    // Giving that height to the grid and adding captions again stretches rows
+    // and overflows an otherwise correctly sized parent.
+    if let Some(wrapper_height) = inputs.known_dimensions.height
+        && !ctx.captions.is_empty()
+    {
+        let width = inputs.known_dimensions.width.unwrap_or_else(|| {
+            let mut measure_wrapper = TableTreeWrapper {
+                doc,
+                ctx: Arc::clone(&ctx),
+                style: style.clone(),
+            };
+            taffy::compute_grid_layout(
+                &mut measure_wrapper,
+                node_id,
+                LayoutInput {
+                    run_mode: RunMode::ComputeSize,
+                    known_dimensions: Size {
+                        width: None,
+                        height: None,
+                    },
+                    ..inputs
+                },
+            )
+            .size
+            .width
+        });
+        let mut caption_height = 0.0;
+        for id in &ctx.captions {
+            use taffy::CoreStyle;
+            let margins = doc.nodes[*id]
+                .layout_style()
+                .margin()
+                .resolve_or_zero(Some(width), resolve_calc_value);
+            let caption = doc.compute_child_layout(
+                crate::taffy_node_id(*id),
+                LayoutInput {
+                    run_mode: RunMode::ComputeSize,
+                    known_dimensions: Size {
+                        width: Some((width - margins.left - margins.right).max(0.0)),
+                        height: None,
+                    },
+                    parent_size: Size {
+                        width: Some(width),
+                        height: None,
+                    },
+                    available_space: Size {
+                        width: AvailableSpace::Definite(width),
+                        height: AvailableSpace::MaxContent,
+                    },
+                    ..inputs
+                },
+            );
+            caption_height += caption.size.height + margins.top + margins.bottom;
+        }
+        inputs.known_dimensions.height = Some((wrapper_height - caption_height).max(0.0));
     }
     let table_height = inputs.known_dimensions.height.or(style
         .size

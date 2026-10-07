@@ -281,9 +281,9 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             size,
             border,
             padding,
-            location,
             ..
         } = *node.final_layout();
+        let location = node.visual_location();
         let box_position = Vec2::new(location.x as f64, location.y as f64) * self.scale;
         let box_size = Size::new(size.width as f64, size.height as f64);
         let border_box = Rect::from_origin_size(box_position.to_point(), box_size);
@@ -1021,17 +1021,7 @@ impl ElementCx<'_, '_> {
 
         if let Some(hoisted) = &self.node.stacking_context {
             for hoisted_child in hoisted.neg_z_hoisted_children() {
-                let position = hoisted_child.position(self.node.tree(), self.node.id);
-                let pos = kurbo::Vec2 {
-                    x: position.x as f64 * self.scale,
-                    y: position.y as f64 * self.scale,
-                };
-                self.render_node(
-                    scene,
-                    hoisted_child.node_id,
-                    parent_style_transform.pre_translate(pos),
-                    clip_rect,
-                );
+                self.draw_hoisted_child(scene, hoisted_child, parent_style_transform, clip_rect);
             }
         }
 
@@ -1061,18 +1051,47 @@ impl ElementCx<'_, '_> {
         // Positive z_index hoisted nodes
         if let Some(hoisted) = &self.node.stacking_context {
             for hoisted_child in hoisted.pos_z_hoisted_children() {
-                let position = hoisted_child.position(self.node.tree(), self.node.id);
-                let pos = kurbo::Vec2 {
-                    x: position.x as f64 * self.scale,
-                    y: position.y as f64 * self.scale,
-                };
-                self.render_node(
-                    scene,
-                    hoisted_child.node_id,
-                    parent_style_transform.pre_translate(pos),
-                    clip_rect,
-                );
+                self.draw_hoisted_child(scene, hoisted_child, parent_style_transform, clip_rect);
             }
+        }
+    }
+
+    fn draw_hoisted_child(
+        &self,
+        scene: &mut impl PaintScene,
+        child: &blitz_dom::HoistedPaintChild,
+        parent_transform: Affine,
+        mut clip_rect: Rect,
+    ) {
+        let tree = self.node.tree();
+        let clips = child.clip_ancestors(tree, self.node.id);
+        for id in &clips {
+            let node = &tree[*id];
+            let offset = blitz_dom::hoisted_child_position(tree, self.node.id, *id);
+            let location = node.visual_location();
+            let transform = parent_transform.pre_translate(Vec2::new(
+                (offset.x + location.x) as f64 * self.scale,
+                (offset.y + location.y) as f64 * self.scale,
+            )) * node.transform().as_deref().copied().unwrap_or_default();
+            let style = node.primary_styles().unwrap();
+            let frame = create_css_rect(&style, node.final_layout(), self.scale);
+            let clip = frame.padding_box_path();
+            scene.push_clip_layer(peniko::Fill::NonZero, transform, &clip);
+            let screen = Affine::translate((-self.initial_x, -self.initial_y)) * transform;
+            clip_rect = clip_rect.intersect(screen.transform_rect_bbox(clip.bounding_box()));
+        }
+        let offset = child.position(tree, self.node.id);
+        self.render_node(
+            scene,
+            child.node_id,
+            parent_transform.pre_translate(Vec2::new(
+                offset.x as f64 * self.scale,
+                offset.y as f64 * self.scale,
+            )),
+            clip_rect,
+        );
+        for _ in clips {
+            scene.pop_layer();
         }
     }
 

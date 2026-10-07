@@ -56,6 +56,7 @@ mod query_selector;
 mod resolve;
 /// Computation of resolved CSS property values (`getComputedStyle()`)
 mod resolved_style;
+mod scroll_anchor;
 /// Scrolling of nodes and the viewport, and scroll animations.
 mod scrolling;
 mod selection;
@@ -68,6 +69,7 @@ mod stylo_to_parley;
 pub mod traversal;
 /// Versioned storage for the nodes of the DOM tree.
 mod tree;
+mod visual_geometry;
 
 mod url;
 

@@ -30,6 +30,10 @@ bitflags! {
         /// An `auto` width is used as `fit-content` (a block-level button in a
         /// block container is shrink-to-fit).
         const FIT_CONTENT_WIDTH = 1 << 2;
+        /// Native checkbox and radio widgets disregard author padding and
+        /// borders for their internal box model. Their specified outer size
+        /// still participates in layout as a replaced widget.
+        const NATIVE_CHECKABLE_CONTROL = 1 << 3;
     }
 }
 
@@ -210,6 +214,9 @@ impl<T: Deref<Target = ComputedValues>> taffy::CoreStyle for TaffyStyloStyle<T> 
 
     #[inline]
     fn padding(&self) -> taffy::Rect<taffy::LengthPercentage> {
+        if self.flags.contains(StyleFlags::NATIVE_CHECKABLE_CONTROL) {
+            return taffy::Rect::ZERO.map(taffy::style_helpers::length);
+        }
         let padding_styles = self.style.get_padding();
         taffy::Rect {
             left: convert::length_percentage(&padding_styles.padding_left.0),
@@ -221,6 +228,9 @@ impl<T: Deref<Target = ComputedValues>> taffy::CoreStyle for TaffyStyloStyle<T> 
 
     #[inline]
     fn border(&self) -> taffy::Rect<taffy::LengthPercentage> {
+        if self.flags.contains(StyleFlags::NATIVE_CHECKABLE_CONTROL) {
+            return taffy::Rect::ZERO.map(taffy::style_helpers::length);
+        }
         if let Some(border) = self.table_cell_border {
             return border.map(taffy::style_helpers::length);
         }

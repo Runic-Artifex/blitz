@@ -2,13 +2,57 @@ use super::ElementCx;
 use crate::color::{Color, ToColorColor as _};
 use anyrender::PaintScene;
 use blitz_dom::local_name;
-use kurbo::{Affine, BezPath, Cap, Circle, Join, Point, RoundedRect, Stroke, Vec2};
+use kurbo::{Affine, BezPath, Cap, Circle, Join, Point, RoundedRect, Stroke};
 use peniko::Fill;
+use style::computed_value_flags::ComputedValueFlags;
 use style::dom::TElement as _;
+use style::values::computed::Appearance;
 
 impl ElementCx<'_, '_> {
+    pub(super) fn is_native_checkable_input(&self) -> bool {
+        self.node.local_name() == "input"
+            && matches!(
+                self.node.attr(local_name!("type")),
+                Some("checkbox" | "radio")
+            )
+            && self.style.get_box().clone_appearance() != Appearance::None
+    }
+
+    /// Blink's native text controls retain their CSS box metrics, but paint a
+    /// one-device-pixel widget frame unless the author supplies a border or
+    /// background. Keep the author path in the ordinary CSS painters so
+    /// `appearance: none` and author decoration remain conventional boxes.
+    pub(super) fn has_native_text_control_frame(&self) -> bool {
+        self.text_input.is_some()
+            && self.style.get_box().clone_appearance() != Appearance::None
+            && !self
+                .style
+                .flags
+                .contains(ComputedValueFlags::HAS_AUTHOR_SPECIFIED_BORDER_BACKGROUND)
+    }
+
+    pub(super) fn draw_native_text_control_frame(&self, scene: &mut impl PaintScene) {
+        if !self.has_native_text_control_frame() {
+            return;
+        }
+
+        // Chrome's Linux theme leaves the second CSS border pixel as widget
+        // interior, while its visual frame is one #767676 pixel with a two
+        // pixel corner radius. The CSS border still participates in layout.
+        let outer = self.frame.border_box.to_rounded_rect(2.0);
+        let inner = self.frame.border_box.inset(-1.0).to_rounded_rect(1.0);
+        scene.fill(
+            Fill::NonZero,
+            self.transform,
+            Color::from_rgba8(0x76, 0x76, 0x76, 255),
+            None,
+            &outer,
+        );
+        scene.fill(Fill::NonZero, self.transform, Color::WHITE, None, &inner);
+    }
+
     pub(super) fn draw_input(&self, scene: &mut impl PaintScene) {
-        if self.node.local_name() != "input" {
+        if !self.is_native_checkable_input() {
             return;
         }
         let Some(checked) = self.element.checkbox_input_checked() else {
@@ -42,8 +86,18 @@ impl ElementCx<'_, '_> {
         let height = self.frame.border_box.height();
         let min_dimension = width.min(height);
         let scale = (min_dimension - 4.0).max(0.0) / 16.0;
-
-        let frame = self.frame.border_box.to_rounded_rect(scale * 2.0);
+        // Native checkables paint a centred square widget within an author
+        // supplied rectangular border box. Their author padding, border,
+        // background and radius remain computed but are not the widget frame.
+        let center = self.frame.border_box.center();
+        let half = min_dimension / 2.0;
+        let widget_rect = kurbo::Rect::new(
+            center.x - half,
+            center.y - half,
+            center.x + half,
+            center.y + half,
+        );
+        let frame = widget_rect.to_rounded_rect(2.0);
 
         match type_attr {
             Some("checkbox") => {
@@ -66,7 +120,7 @@ impl ElementCx<'_, '_> {
                     self.transform,
                     accent_color,
                     border_color,
-                    scale,
+                    min_dimension,
                 );
             }
             _ => {}
@@ -85,20 +139,20 @@ fn draw_checkbox(
 ) {
     if checked {
         scene.fill(Fill::NonZero, transform, accent_color, None, &frame);
-        //Tick code derived from masonry
+        // NativeThemeBase::PaintCheckbox expresses the tick as fractions of
+        // its centred square, with a 0.16-height stroke.
+        let rect = frame.rect();
         let mut path = BezPath::new();
-        path.move_to((2.0, 9.0));
-        path.line_to((6.0, 13.0));
-        path.line_to((14.0, 2.0));
-
-        path.apply_affine(Affine::translate(Vec2 { x: 2.0, y: 1.0 }).then_scale(scale));
+        path.move_to((rect.x0 + rect.width() * 0.2, rect.center().y));
+        path.line_to((rect.x0 + rect.width() * 0.4, rect.y0 + rect.height() * 0.7));
+        path.line_to((rect.x1 - rect.width() * 0.2, rect.y0 + rect.height() * 0.2));
 
         let style = Stroke {
-            width: 2.0 * scale,
-            join: Join::Round,
+            width: rect.height() * 0.16,
+            join: Join::Miter,
             miter_limit: 10.0,
-            start_cap: Cap::Round,
-            end_cap: Cap::Round,
+            start_cap: Cap::Butt,
+            end_cap: Cap::Butt,
             dash_pattern: Default::default(),
             dash_offset: 0.0,
         };
@@ -121,17 +175,29 @@ fn draw_radio_button(
     transform: Affine,
     accent_color: Color,
     border_color: Color,
-    scale: f64,
+    diameter: f64,
 ) {
-    let outer_ring = Circle::new(center, 8.0 * scale);
-    let gap = Circle::new(center, 6.0 * scale);
-    let inner_circle = Circle::new(center, 4.0 * scale);
+    // NativeThemeBase::PaintCheckboxRadioCommon fills a square inset by 0.2
+    // then strokes its centred circle one pixel wide. A checked radio adds a
+    // 20%-inset accent dot; it does not use the former two-pixel ring model.
+    let background = Circle::new(center, (diameter / 2.0 - 0.2).max(0.0));
+    scene.fill(Fill::NonZero, transform, Color::WHITE, None, &background);
+
+    let outline = Circle::new(center, (diameter / 2.0 - 0.5).max(0.0));
+    let outline_style = Stroke {
+        width: 1.0,
+        join: Join::Miter,
+        miter_limit: 10.0,
+        start_cap: Cap::Butt,
+        end_cap: Cap::Butt,
+        dash_pattern: Default::default(),
+        dash_offset: 0.0,
+    };
+    let outline_color = checked.then_some(accent_color).unwrap_or(border_color);
+    scene.stroke(&outline_style, transform, outline_color, None, &outline);
+
     if checked {
-        scene.fill(Fill::NonZero, transform, accent_color, None, &outer_ring);
-        scene.fill(Fill::NonZero, transform, Color::WHITE, None, &gap);
-        scene.fill(Fill::NonZero, transform, accent_color, None, &inner_circle);
-    } else {
-        scene.fill(Fill::NonZero, transform, border_color, None, &outer_ring);
-        scene.fill(Fill::NonZero, transform, Color::WHITE, None, &gap);
+        let dot = Circle::new(center, (diameter * 0.3).max(0.0));
+        scene.fill(Fill::NonZero, transform, accent_color, None, &dot);
     }
 }

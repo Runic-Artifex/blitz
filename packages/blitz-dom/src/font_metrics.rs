@@ -12,6 +12,17 @@ use style::{
     values::computed::{CSSPixelLength, font::QueryFontMetricsFlags},
 };
 
+/// Metrics Blink uses for the intrinsic inline size of a text control.
+///
+/// The average comes from the primary font's OS/2 table when it is sensible;
+/// otherwise the shaped `0` advance is the compatibility fallback. `max_width`
+/// is only meaningful alongside a valid average width.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TextControlFontMetrics {
+    pub(crate) average_width: f32,
+    pub(crate) max_width: Option<f32>,
+}
+
 /// Query fontique for the fonts matching `font_styles` (family list and attributes).
 fn query_for_font_styles<'a>(
     font_ctx: &'a mut FontContext,
@@ -32,6 +43,65 @@ fn query_for_font_styles<'a>(
         style: stylo_to_parley::font_style(font_styles.font_style),
     });
     query
+}
+
+/// Return primary-font metrics for text-control intrinsic sizing.
+///
+/// Chromium on Linux keeps a valid OS/2 `xAvgCharWidth` at its fractional
+/// value and uses the rounded horizontal extent of the font bounds as the
+/// control's maximum character width. It falls back to the `0` glyph when the
+/// average table is missing or implausibly wide. This keeps a CSS input's
+/// automatic minimum separate from the `ch` unit, which is always based on one
+/// glyph advance.
+pub(crate) fn text_control_font_metrics(
+    font_ctx: &mut FontContext,
+    font_styles: &FontStyles,
+    font_size: f32,
+) -> Option<TextControlFontMetrics> {
+    use parley::fontique::{QueryFont, QueryStatus};
+    use skrifa::instance::{LocationRef, Size};
+    use skrifa::metrics::{GlyphMetrics, Metrics};
+
+    let mut query = query_for_font_styles(font_ctx, font_styles);
+    let mut primary: Option<QueryFont> = None;
+    query.matches_with(|font| {
+        primary = Some(font.clone());
+        QueryStatus::Stop
+    });
+    let primary = primary?;
+    let font_ref = skrifa::FontRef::from_index(primary.blob.as_ref(), primary.index).ok()?;
+    let variations = stylo_to_parley::font_variations(&font_styles.font_variation_settings);
+    let location = font_ref.axes().location(
+        variations
+            .iter()
+            .map(|v| (skrifa::Tag::from_be_bytes(v.tag.to_bytes()), v.value)),
+    );
+    let location_ref = LocationRef::from(&location);
+    let metrics = Metrics::new(&font_ref, Size::new(font_size), location_ref);
+    let zero_width = {
+        let glyph_id = Charmap::new(&font_ref).map('0')?;
+        GlyphMetrics::new(&font_ref, Size::new(font_size), location_ref).advance_width(glyph_id)?
+    };
+    let average_width = metrics
+        .average_width
+        .filter(|width| width.is_finite() && *width > 0.0 && *width <= zero_width * 1.7);
+    Some(match average_width {
+        Some(average_width) => TextControlFontMetrics {
+            average_width,
+            // Blink's Linux SimpleFontData uses
+            // round(SkFontMetrics::fXMax - fXMin), rather than hhea's
+            // advanceWidthMax. Skrifa exposes the equivalent scaled head
+            // bounds through `Metrics::bounds`.
+            max_width: metrics
+                .bounds
+                .map(|bounds| (bounds.x_max - bounds.x_min).round())
+                .filter(|width| width.is_finite() && *width > 0.0),
+        },
+        None => TextControlFontMetrics {
+            average_width: zero_width,
+            max_width: None,
+        },
+    })
 }
 
 #[derive(Clone)]

@@ -229,8 +229,8 @@ fn round_dot_path(center: Point, radius: f64) -> BezPath {
 }
 
 /// Return `count` points spaced `spacing` apart (by arc length) along `path`,
-/// starting at its beginning. Used to place dots along a rounded border.
-fn sample_points_along_path(path: &BezPath, spacing: f64, count: usize) -> Vec<Point> {
+/// beginning at `offset`. Used to place dots along a rounded border.
+fn sample_points_along_path(path: &BezPath, offset: f64, spacing: f64, count: usize) -> Vec<Point> {
     // Flatten to a polyline so we can walk it by arc length.
     let mut poly: Vec<Point> = Vec::new();
     kurbo::flatten(path.iter(), 0.1, |el| match el {
@@ -252,7 +252,7 @@ fn sample_points_along_path(path: &BezPath, spacing: f64, count: usize) -> Vec<P
     let mut seg_start = 0.0;
     let mut seg_len = (poly[1] - poly[0]).hypot();
     for i in 0..count {
-        let target = i as f64 * spacing;
+        let target = offset + i as f64 * spacing;
         while seg + 2 < poly.len() && target > seg_start + seg_len {
             seg_start += seg_len;
             seg += 1;
@@ -271,6 +271,15 @@ fn sample_points_along_path(path: &BezPath, spacing: f64, count: usize) -> Vec<P
 impl ElementCx<'_, '_> {
     /// Draw all borders for a node
     pub(crate) fn draw_border(&self, scene: &mut impl PaintScene) {
+        // Native checkbox and radio painting owns the widget border. Author
+        // border values are still computed, but native appearance may
+        // disregard them; `appearance: none` does not take this path.
+        if self.is_native_checkable_input() {
+            return;
+        }
+        if self.has_native_text_control_frame() {
+            return;
+        }
         use style::values::specified::box_::DisplayInside;
         let display = self.style.clone_display().inside();
         if matches!(
@@ -597,9 +606,15 @@ impl ElementCx<'_, '_> {
             if perimeter <= 0.0 {
                 return;
             }
-            let count = (perimeter / (2.0 * thickness)).round().max(1.0);
-            let spacing = perimeter / count;
-            for center in sample_points_along_path(&centerline, spacing, count as usize) {
+            let count = (perimeter / (2.0 * thickness)).round().max(1.0) as usize;
+            let spacing = perimeter / count as f64;
+            // Blink phases a dotted stroke by one dash length. Keeping that phase
+            // on the closed centre line is important: an unphased ring puts the
+            // first dot at the arbitrary path seam and shifts every rounded-corner
+            // dot by roughly half a dot. The modulo spacing remains unchanged, so
+            // this also preserves the uniform closure gap.
+            let phase = thickness.min(spacing * 0.5);
+            for center in sample_points_along_path(&centerline, phase, spacing, count) {
                 path.extend(round_dot_path(center, radius));
             }
         } else {

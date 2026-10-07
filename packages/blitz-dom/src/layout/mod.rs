@@ -4,6 +4,7 @@
 //! However, in Blitz, we do a style pass then a layout pass.
 //! This is slower, yes, but happens fast enough that it's not a huge issue.
 
+use crate::font_metrics::text_control_font_metrics;
 use crate::node::{ComputedStyleRef, ImageData, NodeData, SpecialElementData};
 use crate::{document::BaseDocument, dom_node_id, node::Node, taffy_node_id};
 use markup5ever::{LocalName, local_name};
@@ -334,7 +335,7 @@ impl BaseDocument {
                         .attr(local_name!("cols"))
                         .and_then(|val| val.parse::<f32>().ok());
 
-                    let output = compute_leaf_layout(
+                    let mut output = compute_leaf_layout(
                         inputs,
                         &node.layout_style(),
                         resolve_calc_value,
@@ -345,6 +346,12 @@ impl BaseDocument {
                             height: resolved_line_height.unwrap_or(16.0) * rows,
                         },
                     );
+                    // Blink exports the textarea inner editor's first-line
+                    // baseline from its padding edge. A textarea without that
+                    // baseline sits its bottom on the surrounding line and
+                    // inflates the line beyond its own border-box height.
+                    let baseline =
+                        textarea_baseline(node, self.viewport.scale(), inputs.parent_size.width);
                     if inputs.run_mode == RunMode::PerformLayout {
                         let pb = {
                             let style = node.layout_style();
@@ -370,6 +377,7 @@ impl BaseDocument {
                             );
                         }
                     }
+                    output.baselines.first = baseline;
                     return output;
                 }
 
@@ -379,10 +387,16 @@ impl BaseDocument {
                         Some("hidden") => {
                             return taffy::LayoutOutput::HIDDEN;
                         }
-                        Some("checkbox") => {
-                            return compute_leaf_layout(
+                        Some("checkbox" | "radio") => {
+                            // Native checkable controls use the author width and
+                            // height as their outer widget box. As permitted by
+                            // CSS UI, their native appearance disregards author
+                            // padding and borders; `appearance: none` remains a
+                            // regular CSS box.
+                            let control_style = node.layout_style();
+                            let mut output = compute_leaf_layout(
                                 inputs,
-                                &node.layout_style(),
+                                &control_style,
                                 resolve_calc_value,
                                 |_known_size, _available_space| {
                                     let size = node.layout_style().size();
@@ -401,17 +415,76 @@ impl BaseDocument {
                                     }
                                 },
                             );
+                            if control_style
+                                .flags
+                                .contains(stylo_taffy::StyleFlags::NATIVE_CHECKABLE_CONTROL)
+                            {
+                                // Native checkables expose their border-box
+                                // bottom as the inline baseline. The bottom
+                                // margin belongs below it, like Blink's Linux
+                                // native theme, rather than in the ascent.
+                                output.baselines.first = Some(output.size.height);
+                            }
+                            return output;
                         }
                         None | Some("text" | "password" | "email" | "tel" | "url" | "search") => {
+                            // Blink sizes text controls from the primary
+                            // font's OS/2 average width (or the `0`
+                            // glyph fallback), not from `ch`. The intrinsic
+                            // contribution is the automatic flex minimum as
+                            // well as the preferred width in normal flow.
+                            let factor = element_data
+                                .attr(local_name!("size"))
+                                .and_then(|value| value.parse::<u32>().ok())
+                                .filter(|size| *size > 0)
+                                .unwrap_or(20) as f32;
+                            let intrinsic_width = node
+                                .primary_styles()
+                                .and_then(|style| {
+                                    let font_size = style.clone_font_size().used_size().px();
+                                    text_control_font_metrics(
+                                        &mut self.font_ctx.lock().unwrap(),
+                                        style.get_font(),
+                                        font_size,
+                                    )
+                                    .map(|metrics| {
+                                        (metrics.average_width * factor
+                                            + metrics
+                                                .max_width
+                                                .map(|max_width| max_width - metrics.average_width)
+                                                .unwrap_or(0.0))
+                                        .ceil()
+                                    })
+                                })
+                                // Match HTML's font-independent character-width
+                                // fallback when the configured font is absent.
+                                .unwrap_or_else(|| {
+                                    let font_size = font_size.unwrap_or(16.0);
+                                    font_size * 0.5 * (factor - 1.0) + font_size
+                                });
                             let mut output = compute_leaf_layout(
                                 inputs,
                                 &node.layout_style(),
                                 resolve_calc_value,
                                 |_known_size, _available_space| taffy::Size {
                                     width: match inputs.available_space.width {
-                                        AvailableSpace::Definite(limit) => limit.min(300.0),
-                                        AvailableSpace::MinContent => 0.0,
-                                        AvailableSpace::MaxContent => 300.0,
+                                        AvailableSpace::Definite(limit) => {
+                                            limit.min(intrinsic_width)
+                                        }
+                                        AvailableSpace::MinContent
+                                            if node
+                                                .layout_style()
+                                                .size()
+                                                .width
+                                                .into_raw()
+                                                .tag()
+                                                == taffy::CompactLength::PERCENT_TAG =>
+                                        {
+                                            0.0
+                                        }
+                                        AvailableSpace::MinContent | AvailableSpace::MaxContent => {
+                                            intrinsic_width
+                                        }
                                     },
                                     height: resolved_line_height.unwrap_or(16.0),
                                 },
@@ -983,4 +1056,20 @@ fn text_input_baseline(
     let editor_height = input.editor.try_layout()?.height() / scale;
     let offset = ((content_height - editor_height) / 2.0).max(0.0);
     Some(pb.top + offset + line.metrics().baseline / scale)
+}
+
+/// The baseline of a textarea is its inner editor's first line, positioned at
+/// the start padding edge. Unlike a single-line input, a textarea does not
+/// vertically centre its editor in unused content height.
+fn textarea_baseline(node: &Node, scale: f32, parent_width: Option<f32>) -> Option<f32> {
+    let input = node.element_data()?.text_input_data()?;
+    let line = input.editor.try_layout()?.lines().next()?;
+    let style = node.layout_style();
+    let pb = style
+        .padding()
+        .resolve_or_zero(parent_width, resolve_calc_value)
+        + style
+            .border()
+            .resolve_or_zero(parent_width, resolve_calc_value);
+    Some(pb.top + line.metrics().baseline / scale)
 }

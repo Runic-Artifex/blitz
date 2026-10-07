@@ -41,6 +41,7 @@ pub struct NodeTree {
     /// Scroll offset of the viewport (the root element scrolls the viewport,
     /// so its offset lives here rather than on the node).
     viewport_scroll: crate::Point<f64>,
+    viewport_size: taffy::Size<f32>,
 }
 
 impl NodeTree {
@@ -49,11 +50,24 @@ impl NodeTree {
             map: SlotMap::with_key(),
             geometry_generation: AtomicU64::new(1),
             viewport_scroll: crate::Point::ZERO,
+            viewport_size: taffy::Size::ZERO,
         }
     }
 
     pub fn viewport_scroll(&self) -> crate::Point<f64> {
         self.viewport_scroll
+    }
+
+    pub(crate) fn viewport_size(&self) -> taffy::Size<f32> {
+        self.viewport_size
+    }
+
+    pub(crate) fn set_viewport_size(&mut self, (width, height): (f32, f32)) {
+        if self.viewport_size == (taffy::Size { width, height }) {
+            return;
+        }
+        self.viewport_size = taffy::Size { width, height };
+        self.bump_geometry_generation();
     }
 
     /// Memoised paint geometry may depend on the viewport scroll, so this

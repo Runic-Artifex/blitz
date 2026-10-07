@@ -134,6 +134,16 @@ impl<'a> ImageLayerStyles<'a> {
 
 impl ElementCx<'_, '_> {
     pub(super) fn draw_background(&self, scene: &mut impl PaintScene) {
+        // Native checkable widgets paint their whole widget themselves. Their
+        // computed background remains visible to CSSOM but is not an ordinary
+        // CSS background unless `appearance: none` is selected.
+        if self.is_native_checkable_input() {
+            return;
+        }
+        if self.has_native_text_control_frame() {
+            self.draw_native_text_control_frame(scene);
+            return;
+        }
         if self
             .context
             .table_backgrounds

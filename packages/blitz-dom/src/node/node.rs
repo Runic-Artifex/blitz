@@ -124,6 +124,7 @@ pub struct Node {
     /// width and height of its last layout, which container queries evaluate against
     /// (`None` before its first layout: queries on it are unknown).
     pub container_size: Cell<Option<(f32, f32)>>,
+    pub(crate) sticky_offset_cache: Cell<(u64, taffy::Point<f32>)>,
 
     // Flags
     pub flags: NodeFlags,
@@ -424,6 +425,7 @@ impl Node {
             stacking_context: None,
             sc_contribution_cache: RefCell::new(ThinVec::new()),
             container_size: Cell::new(None),
+            sticky_offset_cache: Cell::new((0, taffy::Point::ZERO)),
 
             flags: NodeFlags::empty(),
             data,
@@ -1167,6 +1169,12 @@ impl Node {
             if crate::layout::replaced::is_replaced_element(&el.name.local) {
                 flags |= stylo_taffy::StyleFlags::IS_REPLACED;
             }
+            if el.name.local == local_name!("input")
+                && matches!(el.attr(local_name!("type")), Some("checkbox" | "radio"))
+                && styles.get_box().clone_appearance() != style::values::computed::Appearance::None
+            {
+                flags |= stylo_taffy::StyleFlags::NATIVE_CHECKABLE_CONTROL;
+            }
         }
         if self.is_flow_button() {
             flags |= stylo_taffy::StyleFlags::BUTTON_CONTENT_BOX;
@@ -1299,12 +1307,7 @@ impl Node {
             return true;
         }
 
-        let box_style = style.get_box();
-        if !box_style.transform.0.is_empty()
-            || !matches!(box_style.rotate, Rotate::None)
-            || !matches!(box_style.scale, Scale::None)
-            || !matches!(box_style.translate, Translate::None)
-        {
+        if self.has_css_transform() {
             return true;
         }
 
@@ -1320,6 +1323,16 @@ impl Node {
         // TODO: contain
 
         false
+    }
+
+    pub(crate) fn has_css_transform(&self) -> bool {
+        self.primary_styles().is_some_and(|style| {
+            let b = style.get_box();
+            !b.transform.0.is_empty()
+                || !matches!(b.rotate, Rotate::None)
+                || !matches!(b.scale, Scale::None)
+                || !matches!(b.translate, Translate::None)
+        })
     }
 
     /// Whether this node's styles apply an atomic paint effect (opacity, filter,
@@ -1433,8 +1446,9 @@ impl Node {
             .primary_styles()
             .is_some_and(|style| style.clone_pointer_events() == PointerEvents::None);
 
-        let mut x = x - self.final_layout().location.x + self.scroll_offset().x as f32;
-        let mut y = y - self.final_layout().location.y + self.scroll_offset().y as f32;
+        let location = self.visual_location();
+        let mut x = x - location.x + self.scroll_offset().x as f32;
+        let mut y = y - location.y + self.scroll_offset().y as f32;
 
         if let Some(t) = self.transform().as_deref() {
             let p = t.inverse() * kurbo::Point::new(x as f64 * scale, y as f64 * scale);
@@ -1464,7 +1478,7 @@ impl Node {
                 && box_y >= if outer.y { -inset.top.fract() } else { 0.0 }
                 && box_y < size.height
         } else {
-            !(box_x < 0.0 || box_x > size.width || box_y < 0.0 || box_y > size.height)
+            self.rounded_box_contains(box_x, box_y, taffy::Rect::ZERO)
         };
 
         let overflow_rect = self.final_layout().scrollable_overflow_rect;
@@ -1529,10 +1543,7 @@ impl Node {
             {
                 inset = inset + layout.padding;
             }
-            let inside_clip = box_x >= inset.left
-                && box_x <= size.width - inset.right
-                && box_y >= inset.top
-                && box_y <= size.height - inset.bottom;
+            let inside_clip = self.rounded_box_contains(box_x, box_y, inset);
             if !inside_clip {
                 return (matches_self && !pointer_events_none).then_some(HitResult {
                     node_id: self.id,
@@ -1547,15 +1558,14 @@ impl Node {
             x: self.final_layout().padding.left + self.final_layout().border.left,
             y: self.final_layout().padding.top + self.final_layout().border.top,
         };
-        if self.flags.is_inline_root() {
-            x -= content_box_offset.x;
-            y -= content_box_offset.y;
-        }
 
         // Positive z_index hoisted children
         if matches_hoisted_content {
             if let Some(hoisted) = &self.stacking_context {
                 for hoisted_child in hoisted.pos_z_hoisted_children().rev() {
+                    if !self.hoisted_clips_contain(hoisted_child, x, y, scale) {
+                        continue;
+                    }
                     let pos = hoisted_child.position(self.tree(), self.id);
                     let x = x - pos.x;
                     let y = y - pos.y;
@@ -1576,12 +1586,6 @@ impl Node {
             let mut child_x = x;
             let mut child_y = y;
             if child_position.is_out_of_flow() {
-                // Out-of-flow children's layout location is relative to this node's
-                // border box, so undo the inline-root content-box offset applied above
-                if self.flags.is_inline_root() {
-                    child_x += content_box_offset.x;
-                    child_y += content_box_offset.y;
-                }
                 // Fixed-position children of the root element are positioned
                 // against the viewport and do not scroll with it. (A fixed box
                 // whose containing block is a transformed ancestor scrolls with
@@ -1603,6 +1607,9 @@ impl Node {
         if matches_hoisted_content {
             if let Some(hoisted) = &self.stacking_context {
                 for hoisted_child in hoisted.neg_z_hoisted_children().rev() {
+                    if !self.hoisted_clips_contain(hoisted_child, x, y, scale) {
+                        continue;
+                    }
                     let pos = hoisted_child.position(self.tree(), self.id);
                     let x = x - pos.x;
                     let y = y - pos.y;
@@ -1621,6 +1628,10 @@ impl Node {
         // Overflowing descendant boxes are still tested above.
         // Inline children
         if self.flags.is_inline_root() && (!is_table_cell || matches_self) {
+            // Child boxes, including Parley inline boxes, have border-box
+            // locations. Only the text layout uses content-box coordinates.
+            x -= content_box_offset.x;
+            y -= content_box_offset.y;
             let element_data = &self.element_data().unwrap();
             if let Some(ild) = element_data.inline_layout_data.as_ref() {
                 let layout = &ild.layout;
@@ -1628,6 +1639,15 @@ impl Node {
 
                 if let Some((cluster, _side)) =
                     Cluster::from_point_exact(layout, x * scale, y * scale)
+                    && {
+                        // Parley's line lookup clamps to the first/last line,
+                        // including for exact cluster hits. That is useful for
+                        // caret placement, but must not expand pointer targets
+                        // into padding or the gap below a caption.
+                        let line = cluster.line();
+                        let metrics = line.metrics();
+                        y * scale >= metrics.block_min_coord && y * scale < metrics.block_max_coord
+                    }
                 {
                     let node_id = cluster.style().brush.id;
                     let text_pointer_events_none = self
@@ -1725,8 +1745,9 @@ impl Node {
 
     /// Computes the Document-relative coordinates of the `Node`
     pub fn absolute_position(&self, x: f32, y: f32) -> crate::util::Point<f32> {
-        let x = x + self.final_layout().location.x - self.scroll_offset().x as f32;
-        let y = y + self.final_layout().location.y - self.scroll_offset().y as f32;
+        let location = self.visual_location();
+        let x = x + location.x - self.scroll_offset().x as f32;
+        let y = y + location.y - self.scroll_offset().y as f32;
 
         // Recurse up the positioning hierarchy
         self.containing_block()
@@ -1737,8 +1758,9 @@ impl Node {
     /// Computes the Document-relative coordinates of the `Node` from the unrounded
     /// (sub-pixel) layout, for CSSOM geometry APIs such as `getBoundingClientRect`
     pub fn unrounded_absolute_position(&self, x: f32, y: f32) -> crate::util::Point<f32> {
-        let x = x + self.unrounded_layout().location.x - self.scroll_offset().x as f32;
-        let y = y + self.unrounded_layout().location.y - self.scroll_offset().y as f32;
+        let offset = self.sticky_offset();
+        let x = x + self.unrounded_layout().location.x + offset.x - self.scroll_offset().x as f32;
+        let y = y + self.unrounded_layout().location.y + offset.y - self.scroll_offset().y as f32;
 
         self.containing_block()
             .map(|i| self.with(i).unrounded_absolute_position(x, y))
@@ -1824,6 +1846,17 @@ impl Node {
     /// CSSOM View's `scrollWidth`: the width of the node's content, including
     /// content not visible due to overflow
     pub fn scroll_width(&self) -> f32 {
+        if let Some(input) = self.element_data().and_then(|e| e.text_input_data())
+            && let Some(text) = input.editor.try_layout()
+        {
+            if input.is_multiline {
+                return self.client_width();
+            }
+            let padding = self.final_layout().padding;
+            return self
+                .client_width()
+                .max(text.full_width() / text.scale() + padding.left + padding.right);
+        }
         self.client_width()
             .max(self.final_layout().scrollable_overflow_rect.right)
     }
@@ -1831,8 +1864,35 @@ impl Node {
     /// CSSOM View's `scrollHeight`: the height of the node's content, including
     /// content not visible due to overflow
     pub fn scroll_height(&self) -> f32 {
+        if let Some(input) = self.element_data().and_then(|e| e.text_input_data())
+            && let Some(text) = input.editor.try_layout()
+        {
+            let padding = self.final_layout().padding;
+            return self
+                .client_height()
+                .max(text.height() / text.scale() + padding.top + padding.bottom);
+        }
         self.client_height()
             .max(self.final_layout().scrollable_overflow_rect.bottom)
+    }
+
+    /// CSSOM scroll position, including the editor content of a text control.
+    /// Box-tree positioning continues to use `scroll_offset()` instead.
+    pub fn scroll_position(&self) -> crate::Point<f64> {
+        if let Some(input) = self.element_data().and_then(|e| e.text_input_data()) {
+            return if input.is_multiline {
+                crate::Point {
+                    x: 0.0,
+                    y: input.scroll_offset as f64,
+                }
+            } else {
+                crate::Point {
+                    x: input.scroll_offset as f64,
+                    y: 0.0,
+                }
+            };
+        }
+        *self.scroll_offset()
     }
 
     /// Does the node generate any boxes? (e.g. `getClientRects()` returns an empty

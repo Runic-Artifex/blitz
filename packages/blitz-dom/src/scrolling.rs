@@ -141,8 +141,8 @@ impl BaseDocument {
 
         let target = self.canonical_scroll_target(request.target);
 
-        // Text inputs and sub-documents scroll their own content rather than an overflow
-        // scrollport, so they only take part in the chained (user-initiated) path.
+        // Sub-documents forward user scrolls into their own document. Editors
+        // use the same ranges, clamping and event path as other nodes.
         if let (ScrollTarget::Node(node_id), ScrollAmount::By(delta), ScrollOverflow::Chain) =
             (target, request.amount, request.overflow)
         {
@@ -163,7 +163,11 @@ impl BaseDocument {
             },
         };
         let end = Point {
-            x: unclamped.x.clamp(0.0, max.x),
+            x: if self.scrolls_leftwards(target) {
+                unclamped.x.clamp(-max.x, 0.0)
+            } else {
+                unclamped.x.clamp(0.0, max.x)
+            },
             y: unclamped.y.clamp(0.0, max.y),
         };
 
@@ -219,40 +223,7 @@ impl BaseDocument {
             return Some(sub_doc.scroll(request, dispatch_event));
         }
 
-        // Single-line inputs scroll their text horizontally, multi-line inputs vertically.
-        node.element_data()?.text_input_data()?;
-        let content_box_width = node.final_layout().content_box_width();
-        let content_box_height = node.final_layout().content_box_height();
-        let input = node
-            .element_data_mut()
-            .and_then(|el| el.text_input_data_mut())
-            .unwrap();
-
-        // `TextInputData::scroll_by` takes (and returns the unconsumed part of) a delta in
-        // the opposite direction to a scroll offset.
-        let mut remainder = delta;
-        if input.is_multiline {
-            remainder.y =
-                -(input.scroll_by(-delta.y as f32, content_box_width, content_box_height) as f64);
-        } else {
-            remainder.x =
-                -(input.scroll_by(-delta.x as f32, content_box_width, content_box_height) as f64);
-        }
-
-        let has_changed = remainder != delta;
-
-        if remainder != Point::ZERO {
-            if let Some(next) = self.next_scroller_in_chain(ScrollTarget::Node(node_id)) {
-                let request = ScrollRequest {
-                    target: next,
-                    amount: ScrollAmount::By(remainder),
-                    ..request
-                };
-                return Some(has_changed | self.scroll(request, dispatch_event));
-            }
-        }
-
-        Some(has_changed)
+        None
     }
 
     /// The scroller which unconsumed scroll is transferred to: the node's parent, or the
@@ -326,22 +297,32 @@ impl BaseDocument {
                     return false;
                 };
 
-                let initial = *node.scroll_offset();
-                *node.scroll_offset_mut() = offset;
+                let initial = node.scroll_position();
+                if let Some(input) = node
+                    .element_data_mut()
+                    .and_then(|e| e.text_input_data_mut())
+                {
+                    input.scroll_offset = if input.is_multiline {
+                        offset.y
+                    } else {
+                        offset.x
+                    } as f32;
+                } else {
+                    *node.scroll_offset_mut() = offset;
+                }
                 if offset == initial {
                     return false;
                 }
 
-                let layout = *node.final_layout();
-                self.nodes.bump_geometry_generation();
                 let event = BlitzScrollEvent {
                     scroll_top: offset.y,
                     scroll_left: offset.x,
-                    scroll_width: layout.scroll_width() as i32,
-                    scroll_height: layout.scroll_height() as i32,
-                    client_width: layout.size.width as i32,
-                    client_height: layout.size.height as i32,
+                    scroll_width: node.scroll_width() as i32,
+                    scroll_height: node.scroll_height() as i32,
+                    client_width: node.client_width() as i32,
+                    client_height: node.client_height() as i32,
                 };
+                self.nodes.bump_geometry_generation();
                 dispatch_event(DomEvent::new(node_id, DomEventData::Scroll(event)));
 
                 self.show_scrollbars(node_id);
@@ -475,6 +456,22 @@ impl BaseDocument {
                 let Some(node) = self.nodes.get(node_id) else {
                     return (Point::ZERO, Point::ZERO);
                 };
+
+                if let Some(input) = node.element_data().and_then(|e| e.text_input_data()) {
+                    let max = Point {
+                        x: if input.is_multiline {
+                            0.0
+                        } else {
+                            (node.scroll_width() - node.client_width()).max(0.0) as f64
+                        },
+                        y: if input.is_multiline {
+                            (node.scroll_height() - node.client_height()).max(0.0) as f64
+                        } else {
+                            0.0
+                        },
+                    };
+                    return (node.scroll_position(), max);
+                }
 
                 // An axis with a non-scrolling overflow value has no scrollable range, even
                 // when its content overflows.
@@ -616,7 +613,36 @@ impl BaseDocument {
         }
     }
 
-    /// Scroll the viewport so that the given element has the requested alignment in each axis.
+    fn scrolls_leftwards(&self, target: ScrollTarget) -> bool {
+        let node = match target {
+            ScrollTarget::Node(id) => self.nodes.get(id),
+            ScrollTarget::Viewport => self.try_root_element(),
+        };
+        node.and_then(|n| n.primary_styles())
+            .is_some_and(|s| s.clone_direction() == style::computed_values::direction::T::Rtl)
+    }
+
+    pub(crate) fn clamp_scroll_offsets(&mut self) {
+        let scrolled: Vec<_> = self
+            .nodes
+            .iter()
+            .filter_map(|(id, node)| {
+                node.element_data()?;
+                let offset = node.scroll_position();
+                (offset != Point::ZERO).then_some((id, offset))
+            })
+            .collect();
+        for (id, offset) in scrolled {
+            self.scroll_to(id, offset.x, offset.y, ScrollBehavior::Instant);
+        }
+        if let Some(root) = self.try_root_element().map(|n| n.id) {
+            let offset = self.viewport_scroll();
+            self.scroll_to(root, offset.x, offset.y, ScrollBehavior::Instant);
+        }
+    }
+
+    /// Scroll every ancestor scrollport, then the viewport, to align the
+    /// element's used visual border box in each axis.
     pub fn scroll_into_view(
         &mut self,
         node_id: NodeId,
@@ -624,33 +650,112 @@ impl BaseDocument {
         vertical: ScrollLogicalPosition,
         horizontal: ScrollLogicalPosition,
     ) {
-        let Some(node) = self.nodes.get(node_id) else {
-            return;
-        };
-        let target =
-            node.absolute_position(node.scroll_offset().x as f32, node.scroll_offset().y as f32);
-        let target_size = node.final_layout().size;
         let Some(root_id) = self.try_root_element().map(|root| root.id) else {
             return;
         };
-        let scale = self.viewport.scale() as f64;
-        let viewport_width = self.viewport.window_size.0 as f64 / scale;
-        let viewport_height = self.viewport.window_size.1 as f64 / scale;
-        let x = Self::aligned_scroll_offset(
-            self.viewport_scroll().x,
-            viewport_width,
-            target.x as f64,
-            target_size.width as f64,
-            horizontal,
-        );
-        let y = Self::aligned_scroll_offset(
-            self.viewport_scroll().y,
-            viewport_height,
-            target.y as f64,
-            target_size.height as f64,
-            vertical,
-        );
-        self.scroll_to(root_id, x, y, behavior);
+        let mut scrollers = Vec::new();
+        let mut ancestor = self.nodes.get(node_id).and_then(|n| n.containing_block());
+        while let Some(id) = ancestor {
+            let node = &self.nodes[id];
+            if id != root_id
+                && !node.is_anonymous()
+                && node.primary_styles().is_some_and(|s| {
+                    let scrolling =
+                        |o| matches!(o, Overflow::Auto | Overflow::Scroll | Overflow::Hidden);
+                    scrolling(s.clone_overflow_x()) || scrolling(s.clone_overflow_y())
+                })
+            {
+                scrollers.push(Some(id));
+            }
+            ancestor = node.containing_block();
+        }
+        scrollers.push(None);
+        // Re-read the target after each inner scroll. Its visual position may
+        // have changed, including sticky movement; outer panes align that used
+        // position, rather than its original normal-flow position.
+        for scroller in scrollers {
+            let Some(mut target) = self.get_transformed_client_bounding_rect(node_id) else {
+                return;
+            };
+            if let Some(style) = self.nodes[node_id].primary_styles() {
+                let left = style.clone_scroll_margin_left().px() as f64;
+                let right = style.clone_scroll_margin_right().px() as f64;
+                let top = style.clone_scroll_margin_top().px() as f64;
+                let bottom = style.clone_scroll_margin_bottom().px() as f64;
+                target.x -= left;
+                target.y -= top;
+                target.width += left + right;
+                target.height += top + bottom;
+            }
+            let (current, mut px, mut py, mut width, mut height) = match scroller {
+                Some(id) => {
+                    let node = &self.nodes[id];
+                    let rect = self.get_client_bounding_rect(id).unwrap();
+                    let border = node.unrounded_layout().border;
+                    (
+                        *node.scroll_offset(),
+                        rect.x + border.left as f64,
+                        rect.y + border.top as f64,
+                        node.client_width() as f64,
+                        node.client_height() as f64,
+                    )
+                }
+                None => {
+                    let (width, height) = self.viewport.logical_size();
+                    (
+                        self.viewport_scroll(),
+                        0.0,
+                        0.0,
+                        width as f64,
+                        height as f64,
+                    )
+                }
+            };
+            if let Some(style) = self.nodes[scroller.unwrap_or(root_id)].primary_styles() {
+                let resolve =
+                    |value: style::properties::longhands::scroll_padding_top::computed_value::T,
+                     basis: f64| {
+                        value.non_auto().map_or(0.0, |v| {
+                            v.0.resolve(style::values::computed::CSSPixelLength::new(basis as f32))
+                                .px() as f64
+                        })
+                    };
+                let left = resolve(style.clone_scroll_padding_left(), width);
+                let right = resolve(style.clone_scroll_padding_right(), width);
+                let top = resolve(style.clone_scroll_padding_top(), height);
+                let bottom = resolve(style.clone_scroll_padding_bottom(), height);
+                px += left;
+                py += top;
+                width = (width - left - right).max(0.0);
+                height = (height - top - bottom).max(0.0);
+            }
+            let horizontal = if self
+                .scrolls_leftwards(scroller.map_or(ScrollTarget::Viewport, ScrollTarget::Node))
+            {
+                match horizontal {
+                    ScrollLogicalPosition::Start => ScrollLogicalPosition::End,
+                    ScrollLogicalPosition::End => ScrollLogicalPosition::Start,
+                    other => other,
+                }
+            } else {
+                horizontal
+            };
+            let x = Self::aligned_scroll_offset(
+                current.x,
+                width,
+                target.x - px + current.x,
+                target.width,
+                horizontal,
+            );
+            let y = Self::aligned_scroll_offset(
+                current.y,
+                height,
+                target.y - py + current.y,
+                target.height,
+                vertical,
+            );
+            self.scroll_to(scroller.unwrap_or(root_id), x, y, behavior);
+        }
     }
 
     /// Resolve a URL fragment (the `#...` part of a URL) to a scroll target.

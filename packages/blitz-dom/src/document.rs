@@ -411,7 +411,8 @@ impl BaseDocument {
         let device = make_device(&viewport, media_type.clone(), font_ctx.clone());
         let stylist = Stylist::new(device, QuirksMode::NoQuirks);
         let snapshots = SnapshotMap::new();
-        let nodes = Box::new(NodeTree::new());
+        let mut nodes = Box::new(NodeTree::new());
+        nodes.set_viewport_size(viewport.logical_size());
         let guard = SharedRwLock::new();
         let nodes_to_id = HashMap::new();
 
@@ -2071,6 +2072,7 @@ impl BaseDocument {
 
     pub fn set_viewport(&mut self, viewport: Viewport) {
         let changes = DeviceChanges::from_viewports(&self.viewport, &viewport);
+        self.nodes.set_viewport_size(viewport.logical_size());
         self.viewport = viewport;
         self.queue_device_changes(changes);
     }
@@ -2181,6 +2183,7 @@ impl BaseDocument {
     /// Apply any pending device changes to the stylist, coalescing all changes
     /// since the last flush into a single device rebuild.
     pub(crate) fn flush_pending_device_changes(&mut self) {
+        self.nodes.set_viewport_size(self.viewport.logical_size());
         let changes = std::mem::take(&mut self.pending_device_changes);
         if changes.is_empty() {
             return;
@@ -2358,8 +2361,74 @@ impl BaseDocument {
         })
     }
 
-    /// Computes the size and position of the `Node` relative to the viewport
+    /// The visual border-box bounds in viewport CSS pixels, including this
+    /// node's and its ancestors' CSS transforms. The layout-space variant
+    /// remains available for positioning and containing-block constraints.
+    pub fn get_transformed_client_bounding_rect(&self, node: NodeId) -> Option<BoundingRect> {
+        let mut r = self.get_client_bounding_rect(node)?;
+        if r.width == 0.0 && r.height == 0.0 && !self.get_node(node)?.has_boxes() {
+            return Some(r);
+        }
+        // CSS transforms of the node and its ancestors: the bounding box of the
+        // transformed border box, as getBoundingClientRect reports it. Each
+        // transform applies about its own element's untransformed box
+        // (`Node::transform` is relative to the border box, its translation in
+        // device pixels), innermost first.
+        let scale = self.viewport().scale_f64();
+        let mut corners = [
+            (r.x, r.y),
+            (r.x + r.width, r.y),
+            (r.x, r.y + r.height),
+            (r.x + r.width, r.y + r.height),
+        ];
+        let mut transformed = false;
+        let mut next = Some(node);
+        while let Some(id) = next {
+            let Some(n) = self.get_node(id) else { break };
+            if let Some(t) = n.transform().as_deref() {
+                if let Some(origin) = self.get_client_bounding_rect(id) {
+                    for (x, y) in corners.iter_mut() {
+                        let p = *t
+                            * kurbo::Point::new((*x - origin.x) * scale, (*y - origin.y) * scale);
+                        *x = p.x / scale + origin.x;
+                        *y = p.y / scale + origin.y;
+                    }
+                    transformed = true;
+                }
+            }
+            next = n.parent;
+        }
+        if transformed {
+            let (mut x0, mut y0) = (f64::INFINITY, f64::INFINITY);
+            let (mut x1, mut y1) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+            for (x, y) in corners {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+            r.x = x0;
+            r.y = y0;
+            r.width = x1 - x0;
+            r.height = y1 - y0;
+        }
+        Some(r)
+    }
+
+    /// Layout-space border-box bounds in viewport CSS pixels, before CSS transforms.
     pub fn get_client_bounding_rect(&self, node_id: NodeId) -> Option<BoundingRect> {
+        if self
+            .get_node(node_id)?
+            .primary_styles()
+            .is_some_and(|s| s.clone_display().is_none())
+        {
+            return Some(BoundingRect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            });
+        }
         // Non-atomic inline elements have no layout box of their own: return
         // the union of their per-line-box fragment rects.
         if let Some(rects) = self.inline_fragment_rects(node_id) {
@@ -2385,7 +2454,18 @@ impl BaseDocument {
         }
 
         let node = self.get_node(node_id)?;
-        let pos = node.unrounded_absolute_position(0.0, 0.0);
+        if !node.has_boxes() {
+            return Some(BoundingRect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            });
+        }
+        // This primitive locates scrolled content. A box itself moves with its
+        // ancestors' scroll offsets, but not with its own scroll position.
+        let own_scroll = node.scroll_offset();
+        let pos = node.unrounded_absolute_position(own_scroll.x as f32, own_scroll.y as f32);
 
         Some(BoundingRect {
             x: snap_to_layout_unit(pos.x as f64 - self.viewport_scroll().x),
