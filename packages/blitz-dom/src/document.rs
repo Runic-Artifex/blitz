@@ -1331,6 +1331,12 @@ impl BaseDocument {
                 let info_override = parley::fontique::FontInfoOverride {
                     family_name: overrides.family_name.as_deref(),
                     weight: weight_override,
+                    weight_range: overrides.weight_range.map(|(min, max)| {
+                        (
+                            parley::fontique::FontWeight::new(min),
+                            parley::fontique::FontWeight::new(max),
+                        )
+                    }),
                     style: overrides.style,
                     ..Default::default()
                 };
@@ -3590,6 +3596,7 @@ mod font_face_override_tests {
                     family_name: Some(String::from(ALIAS)),
                     weight: Some(800.0),
                     style: Some(parley::fontique::FontStyle::Italic),
+                    ..Default::default()
                 },
             )),
         };

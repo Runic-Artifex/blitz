@@ -46,10 +46,10 @@ pub(crate) fn stamped_request(url: Url, signal: Option<&AbortSignal>) -> Request
 pub struct FontFaceOverrides {
     /// `font-family` descriptor (the alias the rest of the stylesheet uses).
     pub family_name: Option<String>,
-    /// `font-weight` descriptor as a single CSS weight (100–900). Stylo
-    /// parses this as a range; we record the lower bound, which equals the
-    /// upper bound in the common single-value case.
+    /// Legacy single-weight registration override.
     pub weight: Option<f32>,
+    /// Inclusive CSS `font-weight` descriptor, including single-valued ranges.
+    pub weight_range: Option<(f32, f32)>,
     /// `font-style` descriptor mapped to fontique's `FontStyle`.
     pub style: Option<parley::fontique::FontStyle>,
 }
@@ -423,11 +423,11 @@ pub(crate) fn fetch_font_face_rules<'a>(
                 // style) rather than whatever metadata the TTF reports.
                 let overrides = FontFaceOverrides {
                     family_name: Some(family.name.to_string()),
-                    weight: descriptor
-                        .font_weight
-                        .as_ref()
-                        .and_then(|range| range.0.compute().map(|w| w.value())),
+                    weight_range: descriptor.font_weight.as_ref().and_then(|range| {
+                        Some((range.0.compute()?.value(), range.1.compute()?.value()))
+                    }),
                     style: descriptor.font_style.as_ref().map(stylo_to_fontique_style),
+                    ..Default::default()
                 };
                 Some((src, overrides))
             }
