@@ -304,7 +304,6 @@ fn draw_decoration_line(
     }
     let y = (baseline - offset + size / 2.0) as f64;
     let size = size as f64;
-    let butt_stroke = Stroke::new(size).with_caps(Cap::Butt);
 
     match deco_style {
         TextDecorationStyle::MozNone => {
@@ -312,8 +311,8 @@ fn draw_decoration_line(
         }
         // `solid`
         TextDecorationStyle::Solid => {
-            let line = kurbo::Line::new((x, y), (x + w, y));
-            scene.stroke(&butt_stroke, transform, brush, None, &line);
+            let line = snapped_line(transform, x, w, y - size / 2.0, size);
+            scene.fill(Fill::NonZero, transform, brush, None, &line);
         }
         // Two lines, each `size` thick, separated by a 1px (CSS) gap. This
         // matches Chrome, where the second line is offset by `thickness + 1px`
@@ -322,8 +321,8 @@ fn draw_decoration_line(
         TextDecorationStyle::Double => {
             let one_css_px = scale;
             for cy in [y, y + double_dir * (size + one_css_px)] {
-                let line = kurbo::Line::new((x, cy), (x + w, cy));
-                scene.stroke(&butt_stroke, transform, brush, None, &line);
+                let line = snapped_line(transform, x, w, cy - size / 2.0, size);
+                scene.fill(Fill::NonZero, transform, brush, None, &line);
             }
         }
         // Round dots (diameter = line thickness) spaced one dot apart.
@@ -383,6 +382,21 @@ fn draw_decoration_line(
             scene.stroke(&stroke, transform, brush, None, &path);
         }
     }
+}
+
+/// A solid decoration line as Blink draws it (`GraphicsContext::DrawLineForText`): its
+/// top rounded to the nearest device pixel and a whole number of device pixels thick, at
+/// least one, so that it is never antialiased. Where `transform` rotates or skews, the
+/// line as it is.
+fn snapped_line(transform: Affine, x: f64, w: f64, top: f64, size: f64) -> Rect {
+    let [_, b, c, d, _, ty] = transform.as_coeffs();
+    if b != 0.0 || c != 0.0 || d <= 0.0 {
+        return Rect::new(x, top, x + w, top + size);
+    }
+    let device_top = (top * d + ty + 0.5).floor();
+    let device_size = (size * d).trunc().max(1.0);
+    let local_top = (device_top - ty) / d;
+    Rect::new(x, local_top, x + w, local_top + device_size / d)
 }
 
 /// Paint the decorations accumulated for one line, one line per decorating box.
