@@ -10,7 +10,7 @@ use style::{
 
 use crate::{
     color::{ToColorColor as _, contrast_ratio},
-    kurbo_css::Edge,
+    kurbo_css::{CssBox, Edge},
     render::ElementCx,
 };
 
@@ -979,44 +979,111 @@ impl ElementCx<'_, '_> {
     /// ❌ outset - Defines a 3D outset border. The effect depends on the border-color value
     /// ✅ none - Defines no border
     /// ✅ hidden - Defines a hidden border
+
+    // Outline offset changes paint geometry only, never the layout/hit box.
+    fn outline_offset(&self) -> f64 {
+        self.style.get_outline().outline_offset.to_f64_px() * self.scale
+    }
+
+    fn outline_frame(&self, offset: f64, minimum_radius: f64) -> CssBox {
+        let bounds = self.frame.border_box;
+        let x = offset.max(-bounds.width() / 2.0);
+        let y = offset.max(-bounds.height() / 2.0);
+        let mut radii = self.frame.border_radii;
+        for radius in [
+            &mut radii.top_left,
+            &mut radii.top_right,
+            &mut radii.bottom_left,
+            &mut radii.bottom_right,
+        ] {
+            radius.x = (radius.x + x).max(minimum_radius);
+            radius.y = (radius.y + y).max(minimum_radius);
+        }
+        CssBox::new(
+            bounds.inset(Insets::new(x, y, x, y)),
+            Insets::ZERO,
+            Insets::ZERO,
+            self.frame.outline_width,
+            radii,
+        )
+    }
+
+    fn focus_ring_offset(&self) -> f64 {
+        let border = &self.frame.border_width;
+        let has_border = border.x0.min(border.y0).min(border.x1).min(border.y1) >= self.scale;
+        self.outline_offset() - if has_border { self.scale } else { 0.0 }
+    }
+
     /// The area the outline can paint, with the border box.
     pub(crate) fn outline_extent(&self) -> Rect {
         let outline = self.style.get_outline();
         match outline.outline_style {
-            OutlineStyle::BorderStyle(BorderStyle::None | BorderStyle::Hidden)
-            | OutlineStyle::Auto => self.frame.border_box,
-            OutlineStyle::BorderStyle(_) => self.frame.outline_box.union(self.frame.border_box),
+            OutlineStyle::BorderStyle(BorderStyle::None | BorderStyle::Hidden) => {
+                self.frame.border_box
+            }
+            OutlineStyle::Auto => self
+                .outline_frame(self.focus_ring_offset() + 2.0 * self.scale, 0.0)
+                .border_box
+                .union(self.frame.border_box),
+            OutlineStyle::BorderStyle(_) => self
+                .outline_frame(self.outline_offset(), 0.0)
+                .outline_box
+                .union(self.frame.border_box),
         }
     }
 
     pub(crate) fn draw_outline(&self, scene: &mut impl PaintScene) {
         let outline = self.style.get_outline();
-
         let current_color = self.style.clone_color();
         let color = outline
             .outline_color
             .resolve_to_absolute(&current_color)
             .as_srgb_color();
-
+        if matches!(outline.outline_style, OutlineStyle::Auto) {
+            // Blink's single-box focus ring: overlapping 2px strokes leave a
+            // 1px contrast halo and a 2px inner colour. Auto has a minimum 3px
+            // corner radius independently of an author's square border.
+            let offset = self.focus_ring_offset();
+            let radii = self
+                .outline_frame(self.outline_offset(), 3.0 * self.scale)
+                .border_radii;
+            let mut outer = self.outline_frame(offset + self.scale, 0.0);
+            let mut inner = self.outline_frame(offset, 0.0);
+            outer.border_radii = radii;
+            inner.border_radii = radii;
+            let dark =
+                self.context.dom.viewport().color_scheme == blitz_traits::shell::ColorScheme::Dark;
+            let halo = if dark {
+                Color::from_rgb8(16, 16, 16)
+            } else {
+                Color::WHITE
+            };
+            let stroke = Stroke::new(2.0 * self.scale);
+            scene.stroke(
+                &stroke,
+                self.transform,
+                halo,
+                None,
+                &outer.border_box_path(),
+            );
+            scene.stroke(
+                &stroke,
+                self.transform,
+                color,
+                None,
+                &inner.border_box_path(),
+            );
+            return;
+        }
         let style = match outline.outline_style {
-            OutlineStyle::Auto => return,
             OutlineStyle::BorderStyle(style) => style,
+            OutlineStyle::Auto => unreachable!(),
         };
-
-        let path = match style {
-            BorderStyle::None | BorderStyle::Hidden => return,
-            BorderStyle::Solid => self.frame.outline(),
-
-            // TODO: Implement other border styles
-            BorderStyle::Inset
-            | BorderStyle::Groove
-            | BorderStyle::Outset
-            | BorderStyle::Ridge
-            | BorderStyle::Dotted
-            | BorderStyle::Dashed
-            | BorderStyle::Double => self.frame.outline(),
-        };
-
+        if matches!(style, BorderStyle::None | BorderStyle::Hidden) {
+            return;
+        }
+        // Non-solid outline dash/bevel styles retain the existing solid fallback.
+        let path = self.outline_frame(self.outline_offset(), 0.0).outline();
         scene.fill(Fill::NonZero, self.transform, color, None, &path);
     }
 }

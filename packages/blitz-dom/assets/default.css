@@ -131,9 +131,15 @@ button {
     line-height: normal;
 }
 
-input:focus,
-textarea:focus {
-    outline: 2px solid #4D90FE;
+input:focus-visible,
+textarea:focus-visible,
+button:focus-visible {
+    outline: auto 1px light-dark(#101010, #eeeeee);
+}
+
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible {
+    outline-offset: 2px;
 }
 
 ::placeholder {

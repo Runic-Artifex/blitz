@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::kurbo_css::CssBox;
+use crate::CustomWidgetSceneMap;
 use crate::color::{Color, ToColorColor};
 use crate::debug_overlay::render_debug_overlay;
 use crate::filters::convert_filters;
@@ -17,7 +18,6 @@ use crate::kurbo_css::NonUniformRoundedRectRadii;
 use crate::layers::LayerManager;
 use crate::sizing::compute_object_fit;
 use crate::text::DrawTextContext;
-use crate::{CustomWidgetSceneMap, SELECTION_COLOR};
 use anyrender::{PaintScene, Scene};
 use blitz_dom::node::{
     ListItemLayout, ListItemLayoutPosition, Marker, NodeData, RasterImageData, TextInputData,
@@ -44,6 +44,10 @@ use kurbo::{self, Affine, Insets, Point, Rect, Shape, Size, Stroke, Vec2};
 use peniko::{self, Fill, ImageData, ImageSampler};
 use style::values::generics::color::GenericColor;
 use taffy::Layout;
+
+// Default light control-selection palette; document selection has its own painter.
+const CONTROL_SELECTION_BACKGROUND: Color = Color::from_rgb8(51, 103, 209);
+const CONTROL_SELECTION_FOREGROUND: Color = Color::WHITE;
 
 /// A short-lived struct which holds a bunch of parameters for rendering a scene so
 /// that we don't have to pass them down as parameters
@@ -416,7 +420,6 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // effect layer when there is one.
         let decorations_in_effect_layer = has_opacity || filter.is_some();
         if !decorations_in_effect_layer {
-            cx.draw_outline(scene);
             cx.draw_outset_box_shadow(scene);
         }
 
@@ -489,7 +492,6 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                     layer_backdrop,
                     |scene| {
                         if decorations_in_effect_layer {
-                            cx.draw_outline(scene);
                             cx.draw_outset_box_shadow(scene);
                         }
                         if own_backdrop.is_some() {
@@ -552,6 +554,10 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                                 cx.draw_children(scene, cx.transform, child_clip_rect);
                             },
                         );
+
+                        // Outlines cover the border/content and remain unscrolled.
+                        cx.transform = unscrolled_transform;
+                        cx.draw_outline(scene);
 
                         // Overlay scrollbars, drawn unscrolled above the
                         // clipped content.
@@ -898,34 +904,6 @@ impl ElementCx<'_, '_> {
             let transform = self.transform
                 * Affine::translate((pos.x * self.scale - scroll_x, pos.y * self.scale - scroll_y));
 
-            if self.node.is_focussed() {
-                // Render selection/caret
-                for (rect, _line_idx) in input_data.editor.selection_geometry().iter() {
-                    scene.fill(
-                        Fill::NonZero,
-                        transform,
-                        SELECTION_COLOR,
-                        None,
-                        &convert_rect(rect),
-                    );
-                }
-                if let Some(cursor) = input_data.editor.cursor_geometry(1.5) {
-                    let color = self.style.get_inherited_text().color;
-                    let caret_color = match &self.style.get_inherited_ui().caret_color.0 {
-                        ColorOrAuto::Auto => color,
-                        ColorOrAuto::Color(caret_color) => caret_color.resolve_to_absolute(&color),
-                    };
-
-                    scene.fill(
-                        Fill::NonZero,
-                        transform,
-                        caret_color.as_srgb_color(),
-                        None,
-                        &convert_rect(&cursor),
-                    );
-                };
-            }
-
             // Render text
             let mut draw_text_context = self.context.draw_text_context.borrow_mut();
             match input_data.placeholder.as_ref() {
@@ -951,6 +929,59 @@ impl ElementCx<'_, '_> {
                     None,
                     None,
                 ),
+            }
+            if self.node.is_focussed() {
+                // Cover ordinary glyphs with an opaque background before drawing
+                // the selected foreground; each glyph edge is antialiased once.
+                let selection = input_data.editor.selection_geometry();
+                if !selection.is_empty() {
+                    let mut clip = kurbo::BezPath::new();
+                    for (rect, _) in selection {
+                        let rect = convert_rect(&rect);
+                        scene.fill(
+                            Fill::NonZero,
+                            transform,
+                            CONTROL_SELECTION_BACKGROUND,
+                            None,
+                            &rect,
+                        );
+                        clip.extend(rect.path_elements(0.1));
+                    }
+                    // One text pass for all selected lines (not one per rectangle).
+                    scene.push_clip_layer(Fill::NonZero, transform, &clip);
+                    crate::text::stroke_text(
+                        scene,
+                        input_data.editor.try_layout().unwrap().lines(),
+                        self.context.dom,
+                        transform,
+                        self.scale,
+                        self.node.id,
+                        &mut draw_text_context,
+                        Some(CONTROL_SELECTION_FOREGROUND),
+                        None,
+                    );
+                    scene.pop_layer();
+                }
+                let editable = self.node.attr(local_name!("readonly")).is_none()
+                    && self.node.attr(local_name!("disabled")).is_none();
+                if editable && input_data.editor.raw_selection().is_collapsed() {
+                    if let Some(cursor) = input_data.editor.cursor_geometry(self.scale as f32) {
+                        let color = self.style.get_inherited_text().color;
+                        let caret_color = match &self.style.get_inherited_ui().caret_color.0 {
+                            ColorOrAuto::Auto => color,
+                            ColorOrAuto::Color(caret_color) => {
+                                caret_color.resolve_to_absolute(&color)
+                            }
+                        };
+                        scene.fill(
+                            Fill::NonZero,
+                            transform,
+                            caret_color.as_srgb_color(),
+                            None,
+                            &convert_rect(&cursor),
+                        );
+                    }
+                }
             }
         }
     }
