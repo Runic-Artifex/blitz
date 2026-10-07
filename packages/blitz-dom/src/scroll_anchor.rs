@@ -7,7 +7,7 @@ use style::properties::ComputedValues;
 use style::servo_arc::Arc;
 use style::values::computed::{Overflow, OverflowAnchor};
 
-use crate::{BaseDocument, BoundingRect, ScrollBehavior, util::Point};
+use crate::{BaseDocument, BoundingRect, util::Point};
 
 pub(crate) struct ScrollAnchor {
     scroller: NodeId,
@@ -313,11 +313,12 @@ impl BaseDocument {
             };
             let delta = (rect.y - port.y - anchor.relative_y).round();
             if delta != 0.0 {
-                self.scroll_to(
+                self.scroll_to_for_layout(
                     anchor.scroller,
-                    offset.x,
-                    offset.y + delta,
-                    ScrollBehavior::Instant,
+                    Point {
+                        x: offset.x,
+                        y: offset.y + delta,
+                    },
                 );
             }
         }

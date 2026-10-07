@@ -64,6 +64,8 @@ pub(crate) enum ScrollSource {
     User,
     /// A script-initiated scroll (`scrollTo` and friends, fragment navigation).
     Programmatic,
+    /// Layout clamping or anchoring preserves existing fractional offsets.
+    Layout,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -153,15 +155,22 @@ impl BaseDocument {
             }
         }
 
-        let include_hidden = request.source == ScrollSource::Programmatic;
+        let include_hidden = request.source != ScrollSource::User;
         let (current, max) = self.scroll_state(target, include_hidden);
-        let unclamped = match request.amount {
+        let mut unclamped = match request.amount {
             ScrollAmount::To(to) => to,
             ScrollAmount::By(by) => Point {
                 x: current.x + by.x,
                 y: current.y + by.y,
             },
         };
+        if request.source == ScrollSource::Programmatic {
+            // Match Blink's integer scroll-offset policy for CSSOM scrolls,
+            // including scrollIntoView. Keep user deltas/animation progress
+            // fractional so scroll chaining does not discard subpixel input.
+            unclamped.x = unclamped.x.round();
+            unclamped.y = unclamped.y.round();
+        }
         let end = Point {
             x: if self.scrolls_leftwards(target) {
                 unclamped.x.clamp(-max.x, 0.0)
@@ -633,12 +642,26 @@ impl BaseDocument {
             })
             .collect();
         for (id, offset) in scrolled {
-            self.scroll_to(id, offset.x, offset.y, ScrollBehavior::Instant);
+            self.scroll_to_for_layout(id, offset);
         }
         if let Some(root) = self.try_root_element().map(|n| n.id) {
             let offset = self.viewport_scroll();
-            self.scroll_to(root, offset.x, offset.y, ScrollBehavior::Instant);
+            self.scroll_to_for_layout(root, offset);
         }
+    }
+
+    pub(crate) fn scroll_to_for_layout(&mut self, node: NodeId, offset: Point<f64>) {
+        self.scroll(
+            ScrollRequest {
+                target: ScrollTarget::Node(node),
+                amount: ScrollAmount::To(offset),
+                overflow: ScrollOverflow::Clamp,
+                source: ScrollSource::Layout,
+                behavior: ScrollBehavior::Instant,
+                interrupt_animation: false,
+            },
+            &mut |_| {},
+        );
     }
 
     /// Scroll every ancestor scrollport, then the viewport, to align the
@@ -696,8 +719,16 @@ impl BaseDocument {
                         *node.scroll_offset(),
                         rect.x + border.left as f64,
                         rect.y + border.top as f64,
-                        node.client_width() as f64,
-                        node.client_height() as f64,
+                        (node.unrounded_layout().size.width
+                            - border.left
+                            - border.right
+                            - node.unrounded_layout().scrollbar_size.width)
+                            as f64,
+                        (node.unrounded_layout().size.height
+                            - border.top
+                            - border.bottom
+                            - node.unrounded_layout().scrollbar_size.height)
+                            as f64,
                     )
                 }
                 None => {
