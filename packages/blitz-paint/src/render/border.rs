@@ -215,6 +215,19 @@ fn table_dot_spans(length: f64, width: f64) -> Vec<(f64, f64)> {
     dots
 }
 
+/// Preserve round-dot geometry before the backend's general curve flattening.
+/// A 0.25px curve tolerance loses visible area on small dots. These paths are
+/// built in device units; later CSS transforms can scale this approximation.
+fn round_dot_path(center: Point, radius: f64) -> BezPath {
+    let mut path = BezPath::new();
+    kurbo::flatten(
+        Circle::new(center, radius).path_elements(0.01),
+        0.01,
+        |el| path.push(el),
+    );
+    path
+}
+
 /// Return `count` points spaced `spacing` apart (by arc length) along `path`,
 /// starting at its beginning. Used to place dots along a rounded border.
 fn sample_points_along_path(path: &BezPath, spacing: f64, count: usize) -> Vec<Point> {
@@ -587,7 +600,7 @@ impl ElementCx<'_, '_> {
             let count = (perimeter / (2.0 * thickness)).round().max(1.0);
             let spacing = perimeter / count;
             for center in sample_points_along_path(&centerline, spacing, count as usize) {
-                path.extend(Circle::new(center, radius).path_elements(0.1));
+                path.extend(round_dot_path(center, radius));
             }
         } else {
             // Square corners: a dot is anchored in each corner (both ends of the
@@ -614,7 +627,7 @@ impl ElementCx<'_, '_> {
             if span <= 0.0 {
                 // Edge too short to fit two dots; place a single centred dot.
                 let center = dot_center(length / 2.0);
-                path.extend(Circle::new(center, radius).path_elements(0.1));
+                path.extend(round_dot_path(center, radius));
             } else {
                 // Aim for a centre-to-centre spacing of about two dot diameters,
                 // then adjust it so the first and last dots land in the corners.
@@ -622,7 +635,7 @@ impl ElementCx<'_, '_> {
                 let spacing = span / gaps as f64;
                 for i in 0..=gaps {
                     let center = dot_center(radius + i as f64 * spacing);
-                    path.extend(Circle::new(center, radius).path_elements(0.1));
+                    path.extend(round_dot_path(center, radius));
                 }
             }
         }
@@ -862,7 +875,7 @@ impl ElementCx<'_, '_> {
                                 self.transform,
                                 color,
                                 None,
-                                &Circle::new(center, thickness / 2.0),
+                                &round_dot_path(center, thickness / 2.0),
                             );
                         }
                     } else if border.style == BorderStyle::Dotted {
