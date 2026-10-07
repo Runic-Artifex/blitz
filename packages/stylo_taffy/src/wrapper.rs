@@ -161,7 +161,16 @@ impl<T: Deref<Target = ComputedValues>> taffy::CoreStyle for TaffyStyloStyle<T> 
             } else {
                 width
             },
-            height: convert::dimension(&position_styles.height),
+            // The table formatting context applies cell height as a minimum
+            // border-box contribution to its tracks. Natural content layout
+            // must remain unconstrained so tall content can grow the row.
+            height: if self.style.clone_display().inside()
+                == style::values::specified::box_::DisplayInside::TableCell
+            {
+                taffy::Dimension::auto()
+            } else {
+                convert::dimension(&position_styles.height)
+            },
         }
     }
 

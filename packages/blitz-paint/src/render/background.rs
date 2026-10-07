@@ -134,6 +134,14 @@ impl<'a> ImageLayerStyles<'a> {
 
 impl ElementCx<'_, '_> {
     pub(super) fn draw_background(&self, scene: &mut impl PaintScene) {
+        if self
+            .context
+            .table_backgrounds
+            .borrow()
+            .contains(&self.node.id)
+        {
+            return;
+        }
         // Internal table backgrounds are painted behind each cell by the table
         // root; painting their new hit-test boxes would fill border-spacing.
         use style::values::specified::box_::DisplayInside;
@@ -145,6 +153,32 @@ impl ElementCx<'_, '_> {
                 | DisplayInside::TableFooterGroup
         ) {
             return;
+        }
+        // A cell in a separate paint layer follows the table's collapsed
+        // borders. Clip only its background to the padding box so that layer
+        // cannot cover shared borders; foreground and opacity stay together.
+        let mut clipped_cell = false;
+        if self.style.clone_display().inside() == DisplayInside::TableCell {
+            let mut atomic = false;
+            let mut current = Some(self.node.id);
+            while let Some(id) = current {
+                let node = self.context.dom.get_node(id).unwrap();
+                if let Some(el) = node.element_data() {
+                    if let SpecialElementData::TableRoot(table) = &el.special_data {
+                        clipped_cell = atomic && table.border_collapse == BorderCollapse::Collapse;
+                        break;
+                    }
+                }
+                atomic |= node.is_stacking_context_root(false);
+                current = node.layout_parent.get();
+            }
+        }
+        if clipped_cell {
+            scene.push_clip_layer(
+                Fill::NonZero,
+                self.transform,
+                &self.frame.padding_box_path(),
+            );
         }
         let bg_styles = &self.style.get_background();
         let image_data = &self.element.background_images;
@@ -177,6 +211,62 @@ impl ElementCx<'_, '_> {
                     self.draw_image_layer(scene, &layer);
                 },
             );
+        }
+        if clipped_cell {
+            scene.pop_layer();
+        }
+    }
+
+    /// Collapsed borders paint after ordinary cell backgrounds but before the
+    /// foreground. Cells in independent stacking contexts remain in their own
+    /// paint phase, so their opacity, transforms and isolation are preserved.
+    pub(super) fn draw_table_cell_backgrounds(&self, scene: &mut impl PaintScene) {
+        let SpecialElementData::TableRoot(table) = &self.element.special_data else {
+            return;
+        };
+        if table.border_collapse != BorderCollapse::Collapse {
+            return;
+        }
+        let grid_y = table.grid_rect.borrow().location.y;
+        for cell in &table.cells {
+            let node = self.context.dom.get_node(cell.node_id).unwrap();
+            if node.primary_styles().is_none_or(|style| {
+                style.get_inherited_box().visibility
+                != style::properties::generated::longhands::visibility::computed_value::T::Visible
+            }) {
+                continue;
+            }
+            let layout = *node.final_layout();
+            let mut x = layout.location.x;
+            let mut y = layout.location.y;
+            let mut current = Some(node.id);
+            let mut atomic = false;
+            while let Some(id) = current {
+                if id == self.node.id {
+                    break;
+                }
+                let ancestor = self.context.dom.get_node(id).unwrap();
+                if ancestor.is_stacking_context_root(false) {
+                    atomic = true;
+                    break;
+                }
+                current = ancestor.layout_parent.get();
+                if let Some(parent) = current.filter(|id| *id != self.node.id) {
+                    let parent = self.context.dom.get_node(parent).unwrap();
+                    x += parent.final_layout().location.x;
+                    y += parent.final_layout().location.y;
+                }
+            }
+            if atomic {
+                continue;
+            }
+            let transform = self.transform.pre_translate(Vec2::new(
+                x as f64 * self.scale,
+                (y - grid_y) as f64 * self.scale,
+            ));
+            let cx = self.context.element_cx(node, layout, transform, None);
+            cx.draw_background(scene);
+            self.context.table_backgrounds.borrow_mut().insert(node.id);
         }
     }
 

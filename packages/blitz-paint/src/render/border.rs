@@ -104,6 +104,117 @@ fn dashed_ratios(thickness: f64, scale: f64) -> (f64, f64) {
     }
 }
 
+// Fit complete dashes at both ends while keeping the requested dash length.
+fn table_dash_lengths(length: f64, dash: f64, gap: f64) -> (f64, f64) {
+    if length <= 2.0 * dash {
+        return (length, 0.0);
+    }
+    if length <= 2.0 * dash + gap {
+        let ratio = length / (2.0 * dash + gap);
+        return (dash * ratio, gap * ratio);
+    }
+    let count = ((length + gap) / (dash + gap)).floor().max(2.0);
+    let gap_a = (length - count * dash) / (count - 1.0);
+    let gap_b = (length - (count + 1.0) * dash) / count;
+    (
+        dash,
+        if gap_b <= 0.0 || (gap_a - gap).abs() < (gap_b - gap).abs() {
+            gap_a
+        } else {
+            gap_b
+        },
+    )
+}
+
+fn table_border_rank(style: BorderStyle) -> u8 {
+    match style {
+        BorderStyle::Double => 9,
+        BorderStyle::Solid => 8,
+        BorderStyle::Dashed => 7,
+        BorderStyle::Dotted => 6,
+        BorderStyle::Ridge | BorderStyle::Inset => 5,
+        BorderStyle::Groove | BorderStyle::Outset => 3,
+        _ => 0,
+    }
+}
+
+type TableBorderJoin = (f32, BorderStyle, u8, usize);
+
+fn table_border_cmp(a: TableBorderJoin, b: TableBorderJoin) -> std::cmp::Ordering {
+    a.0.total_cmp(&b.0)
+        .then_with(|| table_border_rank(a.1).cmp(&table_border_rank(b.1)))
+        .then_with(|| a.2.cmp(&b.2))
+        .then_with(|| b.3.cmp(&a.3))
+}
+
+fn table_bevel_colors(color: Color) -> (Color, Color) {
+    let quantize =
+        |color: Color| Color::new(color.components.map(|v| (v * 255.99998).floor() / 255.0));
+    let luminance = color.split().0.relative_luminance();
+    let mut dark = quantize(darken(color));
+    let mut light = if luminance > 0.83077 {
+        color
+    } else {
+        quantize(lighten(color))
+    };
+    if luminance <= 0.014443844 {
+        dark = quantize(lighten(color));
+        light = quantize(lighten(dark));
+    }
+    // Shading preserves alpha; only the RGB channels are quantized.
+    dark.components[3] = color.components[3];
+    light.components[3] = color.components[3];
+    (dark, light)
+}
+
+// Keep thin dots and their gaps integral. Distribute the remainder at the
+// endpoints instead of changing every gap: narrow dots must stay visible and
+// corners must contain a complete dot. Blink uses the same endpoint policy.
+fn table_dot_spans(length: f64, width: f64) -> Vec<(f64, f64)> {
+    if length <= 2.0 * width {
+        return vec![(0.0, length)];
+    }
+    let ideal = (length + width) / (2.0 * width);
+    let count = if width as u32 % 2 == 1 {
+        (ideal - 0.5).ceil()
+    } else {
+        ideal.round()
+    }
+    .max(2.0) as usize;
+    let remainder = length - (2 * count - 1) as f64 * width;
+    let (first_growth, last_growth, first_gap, last_gap) = if width == 1.0 && remainder > 0.0 {
+        (remainder, 0.0, 0.0, 0.0)
+    } else if remainder > 2.0 {
+        (1.0, 1.0, 0.0, remainder - 2.0)
+    } else {
+        let first = remainder.clamp(-1.0, 1.0);
+        (0.0, 0.0, first, remainder - first)
+    };
+    let mut dots = Vec::with_capacity(count);
+    let mut start = 0.0;
+    for i in 0..count {
+        let size = width
+            + if i == 0 {
+                first_growth
+            } else if i + 1 == count {
+                last_growth
+            } else {
+                0.0
+            };
+        dots.push((start, (start + size).min(length)));
+        let gap = width
+            + if i == 0 {
+                first_gap
+            } else if i + 2 == count {
+                last_gap
+            } else {
+                0.0
+            };
+        start += size + gap;
+    }
+    dots
+}
+
 /// Return `count` points spaced `spacing` apart (by arc length) along `path`,
 /// starting at its beginning. Used to place dots along a rounded border.
 fn sample_points_along_path(path: &BezPath, spacing: f64, count: usize) -> Vec<Point> {
@@ -540,6 +651,48 @@ impl ElementCx<'_, '_> {
             return;
         }
         let rtl = table.style.direction == taffy::Direction::Rtl;
+        let strongest = |a: Option<TableBorderJoin>, b: Option<TableBorderJoin>| {
+            [a, b]
+                .into_iter()
+                .flatten()
+                .filter(|b| !b.1.none_or_hidden())
+                .max_by(|a, b| table_border_cmp(*a, *b))
+        };
+        let vertical_join = |row: usize, col: usize| {
+            strongest(
+                row.checked_sub(1)
+                    .and_then(|r| table.vertical_borders.get(r))
+                    .and_then(|v| v.get(col))
+                    .copied()
+                    .flatten()
+                    .map(|b| (b.width, b.style, b.priority, b.source_order)),
+                table
+                    .vertical_borders
+                    .get(row)
+                    .and_then(|v| v.get(col))
+                    .copied()
+                    .flatten()
+                    .map(|b| (b.width, b.style, b.priority, b.source_order)),
+            )
+        };
+        let horizontal_join = |row: usize, col: usize| {
+            strongest(
+                table
+                    .horizontal_borders
+                    .get(row)
+                    .and_then(|v| col.checked_sub(1).and_then(|c| v.get(c)))
+                    .copied()
+                    .flatten()
+                    .map(|b| (b.width, b.style, b.priority, b.source_order)),
+                table
+                    .horizontal_borders
+                    .get(row)
+                    .and_then(|v| v.get(col))
+                    .copied()
+                    .flatten()
+                    .map(|b| (b.width, b.style, b.priority, b.source_order)),
+            )
+        };
         let mut segments = Vec::new();
         for (line, borders) in table.horizontal_borders.iter().enumerate() {
             let y = if line == 0 {
@@ -549,7 +702,17 @@ impl ElementCx<'_, '_> {
             };
             for (col, border) in borders.iter().enumerate() {
                 if let Some(border) = border {
-                    segments.push((*border, true, y, cols[col].start, cols[col].end));
+                    let (left, right) = if rtl { (col + 1, col) } else { (col, col + 1) };
+                    segments.push((
+                        *border,
+                        true,
+                        y,
+                        cols[col].start,
+                        cols[col].end,
+                        vertical_join(line, left),
+                        vertical_join(line, right),
+                        line * (2 * cols.len() + 1) + 2 * col + 1,
+                    ));
                 }
             }
         }
@@ -569,12 +732,27 @@ impl ElementCx<'_, '_> {
                     }
                 };
                 if let Some(border) = border {
-                    segments.push((*border, false, x, rows[row].start, rows[row].end));
+                    segments.push((
+                        *border,
+                        false,
+                        x,
+                        rows[row].start,
+                        rows[row].end,
+                        horizontal_join(row, line),
+                        horizontal_join(row + 1, line),
+                        row * (2 * cols.len() + 1) + 2 * line,
+                    ));
                 }
             }
         }
-        segments.sort_by(|a, b| a.0.width.total_cmp(&b.0.width));
-        for (border, horizontal, line, start, end) in segments {
+        segments.sort_by(|a, b| {
+            table_border_cmp(
+                (a.0.width, a.0.style, a.0.priority, a.0.source_order),
+                (b.0.width, b.0.style, b.0.priority, b.0.source_order),
+            )
+            .then_with(|| a.7.cmp(&b.7))
+        });
+        for (border, horizontal, line, start, end, start_join, end_join, _) in segments {
             if border.style.none_or_hidden() || border.width == 0.0 {
                 continue;
             }
@@ -591,41 +769,124 @@ impl ElementCx<'_, '_> {
             .as_srgb_color();
             let width = border.width as f64;
             let half = width / 2.0;
-            let (line, start, end) = (line as f64, start as f64, end as f64);
+            // A stronger perpendicular border owns the entire junction, including
+            // the gaps in double/dotted styles. Trim the lower-priority segment
+            // before fitting its pattern; overpainting leaves color in those gaps.
+            let extension = |join: Option<TableBorderJoin>| {
+                join.map_or(0.0, |join| {
+                    let stronger = table_border_cmp(
+                        join,
+                        (
+                            border.width,
+                            border.style,
+                            border.priority,
+                            border.source_order,
+                        ),
+                    )
+                    .is_gt();
+                    join.0 as f64 / 2.0 * if stronger { -1.0 } else { 1.0 }
+                })
+            };
+            let (line, start, end) = (
+                line as f64,
+                start as f64 - extension(start_join),
+                end as f64 + extension(end_join),
+            );
+            if end <= start {
+                continue;
+            }
             let rectangle = |lo: f64, hi: f64| {
-                if horizontal {
-                    Rect::new(start - half, line + lo, end + half, line + hi)
+                let rect = if horizontal {
+                    Rect::new(start, line + lo, end, line + hi)
                 } else {
-                    Rect::new(line + lo, start - half, line + hi, end + half)
+                    Rect::new(line + lo, start, line + hi, end)
                 }
-                .scale_from_origin(self.scale)
+                .scale_from_origin(self.scale);
+                // Snap decorations in device space without rounding the layout
+                // boxes, which also carry text and hit-test coordinates.
+                let [a, b, c, d, tx, ty] = self.transform.as_coeffs();
+                if a == 1.0 && b == 0.0 && c == 0.0 && d == 1.0 {
+                    Rect::new(
+                        (rect.x0 + tx).round() - tx,
+                        (rect.y0 + ty).round() - ty,
+                        (rect.x1 + tx).round() - tx,
+                        (rect.y1 + ty).round() - ty,
+                    )
+                } else {
+                    rect
+                }
             };
             match border.style {
                 BorderStyle::Dashed | BorderStyle::Dotted => {
-                    let (a, b) = if horizontal {
-                        (Point::new(start, line), Point::new(end, line))
+                    let rect = rectangle(-half, half);
+                    let thickness = if horizontal {
+                        rect.height()
                     } else {
-                        (Point::new(line, start), Point::new(line, end))
+                        rect.width()
                     };
-                    let mut stroke = Stroke::new(width * self.scale);
-                    if border.style == BorderStyle::Dotted {
-                        stroke = stroke
-                            .with_caps(Cap::Round)
-                            .with_dashes(0.0, [0.0, width * 2.0 * self.scale]);
+                    let length = if horizontal {
+                        rect.width()
                     } else {
-                        stroke = stroke
-                            .with_dashes(0.0, [width * 3.0 * self.scale, width * 3.0 * self.scale]);
+                        rect.height()
+                    };
+                    if thickness <= 0.0 || length <= 0.0 {
+                        continue;
                     }
-                    scene.stroke(
-                        &stroke,
-                        self.transform,
-                        color,
-                        None,
-                        &kurbo::Line::new(
-                            (a.to_vec2() * self.scale).to_point(),
-                            (b.to_vec2() * self.scale).to_point(),
-                        ),
-                    );
+                    let part = |from: f64, to: f64| {
+                        if horizontal {
+                            Rect::new(rect.x0 + from, rect.y0, rect.x0 + to, rect.y1)
+                        } else {
+                            Rect::new(rect.x0, rect.y0 + from, rect.x1, rect.y0 + to)
+                        }
+                    };
+                    if border.style == BorderStyle::Dotted && thickness > 3.0 * self.scale {
+                        // Kurbo discards zero-length dashes, so thick round dots
+                        // need explicit geometry rather than a round-cap stroke.
+                        let span = (length - thickness).max(0.0);
+                        let spacing = if length < 2.0 * thickness {
+                            2.0 * thickness
+                        } else {
+                            let (_, gap) = table_dash_lengths(length, thickness, thickness);
+                            gap + thickness - 0.01
+                        };
+                        let gaps = (span / spacing).floor() as usize;
+                        for i in 0..=gaps {
+                            let along = thickness / 2.0 + spacing * i as f64;
+                            let center = if horizontal {
+                                Point::new(rect.x0 + along, rect.center().y)
+                            } else {
+                                Point::new(rect.center().x, rect.y0 + along)
+                            };
+                            scene.fill(
+                                Fill::NonZero,
+                                self.transform,
+                                color,
+                                None,
+                                &Circle::new(center, thickness / 2.0),
+                            );
+                        }
+                    } else if border.style == BorderStyle::Dotted {
+                        for (from, to) in table_dot_spans(length, thickness) {
+                            scene.fill(Fill::NonZero, self.transform, color, None, &part(from, to));
+                        }
+                    } else {
+                        // Fit complete dashes at the snapped segment's endpoints.
+                        let (dash, gap) = dashed_ratios(thickness, self.scale);
+                        let (dash, gap) =
+                            table_dash_lengths(length, dash * thickness, gap * thickness);
+                        let mut offset = 0.0;
+                        while offset < length - 0.001 {
+                            let end = (offset + dash).min(length);
+                            scene.fill(
+                                Fill::NonZero,
+                                self.transform,
+                                color,
+                                None,
+                                &part(offset, end),
+                            );
+                            offset += (dash + gap).max(0.01);
+                        }
+                    }
                 }
                 BorderStyle::Double if width >= 3.0 => {
                     let third = (width / 3.0).round();
@@ -642,6 +903,31 @@ impl ElementCx<'_, '_> {
                         color,
                         None,
                         &rectangle(half - third, half),
+                    );
+                }
+                BorderStyle::Groove
+                | BorderStyle::Ridge
+                | BorderStyle::Inset
+                | BorderStyle::Outset => {
+                    // CSS2: collapsed inset is ridge, and outset is groove.
+                    let ridge = matches!(border.style, BorderStyle::Ridge | BorderStyle::Inset);
+                    let (dark, light) = table_bevel_colors(color);
+                    // Shared edges are painted as top/left lines, irrespective
+                    // of which side of the originating cell supplied them.
+                    let (low, high) = if !ridge { (dark, light) } else { (light, dark) };
+                    scene.fill(
+                        Fill::NonZero,
+                        self.transform,
+                        low,
+                        None,
+                        &rectangle(-half, 0.0),
+                    );
+                    scene.fill(
+                        Fill::NonZero,
+                        self.transform,
+                        high,
+                        None,
+                        &rectangle(0.0, half),
                     );
                 }
                 _ => scene.fill(

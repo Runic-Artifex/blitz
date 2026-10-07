@@ -6,7 +6,7 @@ mod form_controls;
 mod mask;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::kurbo_css::CssBox;
@@ -65,6 +65,9 @@ pub struct BlitzDomPainter<'dom, 'a> {
     pub(crate) layer_manager: LayerManager,
     /// Reusable scratch allocations shared by all text layouts painted for this document.
     pub(crate) draw_text_context: RefCell<DrawTextContext>,
+    /// Ordinary collapsed-table cell backgrounds painted in the table's
+    /// background phase, before shared borders and cell foreground content.
+    pub(crate) table_backgrounds: RefCell<HashSet<NodeId>>,
     /// Cached selection ranges for O(1) lookup: node_id -> (start_offset, end_offset)
     pub(crate) selection_ranges: HashMap<NodeId, (usize, usize)>,
 
@@ -106,6 +109,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             scrollbar_drag_target: dom.scrollbar_drag_target(),
             layer_manager,
             draw_text_context: RefCell::new(DrawTextContext::default()),
+            table_backgrounds: RefCell::new(HashSet::new()),
             selection_ranges,
             custom_widget_scenes,
         }
@@ -503,6 +507,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                         cx.draw_background(scene);
                         cx.draw_inset_box_shadow(scene);
                         cx.draw_table_row_backgrounds(scene);
+                        cx.draw_table_cell_backgrounds(scene);
                         cx.draw_table_borders(scene);
                         cx.draw_border(scene);
                         cx.stroke_devtools(scene);

@@ -83,3 +83,54 @@ fn rtl_rows_keep_positive_boxes() {
     assert_eq!(rect(&doc, "#a"), [94.0, 2.0, 30.0, 40.0]);
     assert_eq!(rect(&doc, "#b"), [2.0, 2.0, 90.0, 40.0]);
 }
+#[test]
+fn cell_height_is_a_border_box_minimum_and_content_can_grow_it() {
+    let mut doc = document(&format!(
+        "<style>#a{{height:60px;padding:5px;border:2px solid}}</style><table>{ROW}</table>"
+    ));
+    assert_eq!(rect(&doc, "#row")[3], 60.0);
+    assert_eq!(rect(&doc, "#inside")[1], 22.0);
+    let mut inner = doc.inner_mut();
+    let id = inner.query_selector("#a").unwrap().unwrap();
+    inner.mutate().set_attribute(
+        id,
+        QualName::new(None, ns!(), local_name!("style")),
+        "height:10px",
+    );
+    drop(inner);
+    doc.resolve(0.0);
+    assert_eq!(rect(&doc, "#row")[3], 40.0);
+    assert_eq!(rect(&doc, "#inside")[1], 12.0);
+}
+
+#[test]
+fn percentage_cell_height_reserves_space_but_content_can_grow_it() {
+    let mut doc = document(
+        "<table id='table' style='height:160px'><tr id='row'><td id='a' style='height:50%;padding:4px;border:2px solid'><div id='inside' style='width:30px;height:10px'></div></td></tr><tr id='row2'><td style='padding:4px'><div style='width:30px;height:10px'></div></td></tr></table>",
+    );
+    assert_eq!(rect(&doc, "#row")[3], 78.0);
+    assert_eq!(rect(&doc, "#row2")[3], 76.0);
+    let mut inner = doc.inner_mut();
+    let id = inner.query_selector("#inside").unwrap().unwrap();
+    inner.mutate().set_attribute(
+        id,
+        QualName::new(None, ns!(), local_name!("style")),
+        "width:30px;height:120px",
+    );
+    drop(inner);
+    doc.resolve(0.0);
+    assert_eq!(rect(&doc, "#row")[3], 132.0);
+    assert_eq!(rect(&doc, "#row2")[3], 22.0);
+    let mut inner = doc.inner_mut();
+    let id = inner.query_selector("#table").unwrap().unwrap();
+    inner.mutate().set_attribute(
+        id,
+        QualName::new(None, ns!(), local_name!("style")),
+        "height:auto",
+    );
+    drop(inner);
+    doc.resolve(0.0);
+    assert_eq!(rect(&doc, "#row")[3], 132.0);
+    assert_eq!(rect(&doc, "#row2")[3], 18.0);
+    assert_eq!(rect(&doc, "#table")[3], 156.0);
+}

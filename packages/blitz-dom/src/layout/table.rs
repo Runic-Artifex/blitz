@@ -72,6 +72,9 @@ pub struct TableCell {
     pub column: u16,
     pub colspan: u16,
     pub rowspan: u16,
+    /// CSS cell height is a border-box minimum on the table tracks, rather than
+    /// a content-box height constraining the cell's natural content layout.
+    preferred_height: taffy::Dimension,
     style: taffy::Style<Atom>,
 }
 
@@ -621,6 +624,8 @@ fn collect_table_cells(
                 .map(|v| if v == 0 { remaining } else { v.min(remaining) })
                 .unwrap_or(1);
             let mut style = stylo_taffy::to_taffy_style(stylo_style);
+            let preferred_height = stylo_taffy::convert::dimension(&stylo_style.clone_height());
+            style.size.height = style_helpers::auto();
             let col = cursor.next_free();
 
             // In the collapsed borders model the borders are laid out as gutters between
@@ -734,6 +739,7 @@ fn collect_table_cells(
                 column: col,
                 colspan,
                 rowspan,
+                preferred_height,
                 style,
             });
 
@@ -825,7 +831,14 @@ impl taffy::LayoutPartialTree for TableTreeWrapper<'_> {
     ) -> taffy::LayoutOutput {
         let cell = &self.ctx.cells[usize::from(node_id)];
         let node_id = crate::taffy_node_id(cell.node_id);
-        self.doc.compute_child_layout(node_id, inputs)
+        let mut output = self.doc.compute_child_layout(node_id, inputs);
+        if let Some(height) = cell
+            .preferred_height
+            .maybe_resolve(None, resolve_calc_value)
+        {
+            output.size.height = output.size.height.max(height);
+        }
+        output
     }
 }
 
@@ -1069,6 +1082,49 @@ pub(crate) fn compute_table_layout(
         style.padding = taffy::Rect::ZERO.map(style_helpers::length);
         inputs.known_dimensions.width = Some(inputs.known_dimensions.width.unwrap_or(caption_min));
     }
+    let table_height = inputs.known_dimensions.height.or(style
+        .size
+        .height
+        .maybe_resolve(inputs.parent_size.height, resolve_calc_value));
+    let percentage_height_basis = table_height.map(|height| {
+        let insets = padding.top + padding.bottom + border.top + border.bottom;
+        if style.box_sizing == taffy::BoxSizing::BorderBox
+            || inputs.known_dimensions.height.is_some()
+        {
+            (height - insets).max(0.0)
+        } else {
+            height
+        }
+    });
+    // Percentage row requests reserve their share before automatic rows absorb
+    // remaining space. Treating them as intrinsic cell minima instead makes the
+    // grid stretch them a second time along with the automatic tracks.
+    let mut row_percent_heights = vec![None::<f32>; ctx.rows.len()];
+    if let Some(basis) = percentage_height_basis {
+        for cell in &ctx.cells {
+            if cell.rowspan != 1
+                || cell.preferred_height.into_raw().tag() != taffy::CompactLength::PERCENT_TAG
+            {
+                continue;
+            }
+            let row = cell.row as usize;
+            let height = cell
+                .preferred_height
+                .maybe_resolve(Some(basis), resolve_calc_value)
+                .unwrap();
+            let height = height.max(ctx.rows[row].height.unwrap_or(0.0));
+            row_percent_heights[row] = Some(row_percent_heights[row].unwrap_or(0.0).max(height));
+        }
+        for (row, height) in row_percent_heights.iter().enumerate() {
+            if let Some(height) = height {
+                style.grid_template_rows[row] = style_helpers::minmax::<TrackSizingFunction>(
+                    style_helpers::auto(),
+                    style_helpers::length(*height),
+                )
+                .into();
+            }
+        }
+    }
     let mut wrapper = TableTreeWrapper {
         doc,
         ctx: Arc::clone(&ctx),
@@ -1083,6 +1139,7 @@ pub(crate) fn compute_table_layout(
     let mut natural_cells = Vec::new();
     let mut row_baselines = vec![0.0f32; ctx.rows.len()];
     let mut row_descents = vec![0.0f32; ctx.rows.len()];
+    let mut row_min_heights = vec![0.0f32; ctx.rows.len()];
     if inputs.run_mode == RunMode::PerformLayout {
         for cell in &ctx.cells {
             let current = *wrapper.doc.nodes[cell.node_id].unrounded_layout();
@@ -1109,6 +1166,14 @@ pub(crate) fn compute_table_layout(
                         BaselineShiftKeyword::Top | BaselineShiftKeyword::Bottom
                     )
                 );
+            if cell.rowspan == 1 {
+                let r = cell.row as usize;
+                let preferred = cell
+                    .preferred_height
+                    .maybe_resolve(None, resolve_calc_value)
+                    .unwrap_or(0.0);
+                row_min_heights[r] = row_min_heights[r].max(natural.size.height).max(preferred);
+            }
             if baseline_align && cell.rowspan == 1 {
                 let baseline = natural.baselines.first.unwrap_or(natural.size.height);
                 let r = cell.row as usize;
@@ -1120,12 +1185,13 @@ pub(crate) fn compute_table_layout(
         let mut needs_relayout = false;
         if let Some(info) = ctx.computed_grid_info.borrow().as_ref() {
             for (r, track) in info.rows.positions.iter().enumerate().take(ctx.rows.len()) {
-                let needed = row_baselines[r] + row_descents[r];
+                let needed = (row_baselines[r] + row_descents[r]).max(row_min_heights[r]);
                 if needed > track.end - track.start + 0.001 {
                     wrapper.style.grid_template_rows[r] =
                         style_helpers::minmax::<TrackSizingFunction>(
                             style_helpers::length(needed),
-                            style_helpers::auto(),
+                            row_percent_heights[r]
+                                .map_or_else(style_helpers::auto, style_helpers::length),
                         )
                         .into();
                     needs_relayout = true;
@@ -1354,7 +1420,10 @@ pub struct CollapsedBorder {
     pub side: u8,
     pub width: f32,
     pub style: BorderStyle,
-    priority: u8,
+    pub priority: u8,
+    /// Order in which origins are visited in the visual table grid. Earlier
+    /// origins win equal-width/style/color conflicts, including at junctions.
+    pub source_order: usize,
 }
 
 fn border_priority(style: BorderStyle) -> u8 {
@@ -1364,10 +1433,8 @@ fn border_priority(style: BorderStyle) -> u8 {
         BorderStyle::Solid => 8,
         BorderStyle::Dashed => 7,
         BorderStyle::Dotted => 6,
-        BorderStyle::Ridge => 5,
-        BorderStyle::Outset => 4,
-        BorderStyle::Groove => 3,
-        BorderStyle::Inset => 2,
+        BorderStyle::Ridge | BorderStyle::Inset => 5,
+        BorderStyle::Groove | BorderStyle::Outset => 3,
         BorderStyle::None => 0,
     }
 }
@@ -1392,38 +1459,46 @@ fn collapsed_borders(
     let trailing = if rtl { 3 } else { 1 };
     let mut horizontal = vec![vec![None; n]; m + 1];
     let mut vertical = vec![vec![None; n + 1]; m];
-    let offer = |slot: &mut Option<CollapsedBorder>, node_id: NodeId, side: u8, priority: u8| {
-        let Some(styles) = doc.nodes[node_id].primary_styles() else {
-            return;
-        };
-        let b = styles.get_border();
-        let (width, style) = match side {
-            0 => (b.border_top_width.0, b.border_top_style),
-            1 => (b.border_right_width.0, b.border_right_style),
-            2 => (b.border_bottom_width.0, b.border_bottom_style),
-            _ => (b.border_left_width.0, b.border_left_style),
-        };
-        let candidate = CollapsedBorder {
-            node_id,
-            side,
-            width: side_width(width, style),
-            style,
-            priority,
-        };
-        let wins = slot.is_none_or(|old: CollapsedBorder| {
-            if old.style == BorderStyle::Hidden {
-                return false;
+    let mut source_orders = std::collections::HashMap::new();
+    let mut next_source_order = 0;
+    let mut offer =
+        |slot: &mut Option<CollapsedBorder>, node_id: NodeId, side: u8, priority: u8| {
+            let Some(styles) = doc.nodes[node_id].primary_styles() else {
+                return;
+            };
+            let b = styles.get_border();
+            let (width, style) = match side {
+                0 => (b.border_top_width.0, b.border_top_style),
+                1 => (b.border_right_width.0, b.border_right_style),
+                2 => (b.border_bottom_width.0, b.border_bottom_style),
+                _ => (b.border_left_width.0, b.border_left_style),
+            };
+            let candidate = CollapsedBorder {
+                node_id,
+                side,
+                width: side_width(width, style),
+                style,
+                priority,
+                source_order: *source_orders.entry(node_id).or_insert_with(|| {
+                    let order = next_source_order;
+                    next_source_order += 1;
+                    order
+                }),
+            };
+            let wins = slot.is_none_or(|old: CollapsedBorder| {
+                if old.style == BorderStyle::Hidden {
+                    return false;
+                }
+                if candidate.style == BorderStyle::Hidden {
+                    return true;
+                }
+                (candidate.width, border_priority(candidate.style), priority)
+                    > (old.width, border_priority(old.style), old.priority)
+            });
+            if wins {
+                *slot = Some(candidate);
             }
-            if candidate.style == BorderStyle::Hidden {
-                return true;
-            }
-            (candidate.width, border_priority(candidate.style), priority)
-                > (old.width, border_priority(old.style), old.priority)
-        });
-        if wins {
-            *slot = Some(candidate);
-        }
-    };
+        };
     // Offer in visual order so an equal border from the top/left wins.
     for cell in cells.iter() {
         let r = cell.row as usize;
