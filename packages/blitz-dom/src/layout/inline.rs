@@ -205,6 +205,12 @@ impl BaseDocument {
             .take_inline_layout()
             .unwrap();
 
+        // Intrinsic queries may break/align text at a different width after a
+        // PerformLayout result has been cached. Keep its line positions intact:
+        // a subsequent cache hit will reuse that layout for paint and hits.
+        let retained_layout =
+            (inputs.run_mode == RunMode::ComputeSize).then(|| inline_layout.clone());
+
         let style = self.nodes[node_id].layout_style();
 
         // Note: both horizontal and vertical percentage padding/borders are resolved against the container's inline size (i.e. width).
@@ -295,7 +301,7 @@ impl BaseDocument {
                 .data
                 .downcast_element_mut()
                 .unwrap()
-                .inline_layout_data = Some(inline_layout);
+                .inline_layout_data = Some(retained_layout.unwrap_or(inline_layout));
             return LayoutOutput::from_outer_size(
                 Size::ZERO.maybe_max(container_pb.sum_axes().map(Some)),
             );
@@ -620,7 +626,7 @@ impl BaseDocument {
                 .data
                 .downcast_element_mut()
                 .unwrap()
-                .inline_layout_data = Some(inline_layout);
+                .inline_layout_data = Some(retained_layout.unwrap_or(inline_layout));
 
             let measured_size = inputs.known_dimensions.unwrap_or(taffy::Size {
                 width: round_up_width(width, scale, whole_pixels) / scale,
@@ -1041,7 +1047,7 @@ impl BaseDocument {
             .data
             .downcast_element_mut()
             .unwrap()
-            .inline_layout_data = Some(inline_layout);
+            .inline_layout_data = Some(retained_layout.unwrap_or(inline_layout));
 
         let oof_position_inset = taffy::Rect {
             left: border.left,
