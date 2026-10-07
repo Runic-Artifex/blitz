@@ -3663,41 +3663,55 @@ mod disabled_focus_tests {
 
     #[test]
     fn disabled_focus_preserves_previous_target_until_enabled() {
-        let mut doc = BaseDocument::new(DocumentConfig::default());
-        let root = doc.root_node().id;
-        let mut mutator = doc.mutate();
-        let html = mutator.create_element(qual_name!("html"), vec![]);
-        let body = mutator.create_element(qual_name!("body"), vec![]);
-        let enabled = mutator.create_element(qual_name!("input"), vec![]);
-        let disabled = mutator.create_element(
-            qual_name!("input"),
-            vec![Attribute {
-                name: qual_name!("disabled"),
-                value: String::new(),
-            }],
-        );
-        mutator.append_children(body, &[enabled, disabled]);
-        mutator.append_children(html, &[body]);
-        mutator.append_children(root, &[html]);
-        drop(mutator);
+        for value in ["", "false", "true"] {
+            let mut doc = BaseDocument::new(DocumentConfig::default());
+            let root = doc.root_node().id;
+            let mut mutator = doc.mutate();
+            let html = mutator.create_element(qual_name!("html"), vec![]);
+            let body = mutator.create_element(qual_name!("body"), vec![]);
+            let enabled = mutator.create_element(qual_name!("input"), vec![]);
+            let disabled = mutator.create_element(
+                qual_name!("input"),
+                vec![Attribute {
+                    name: qual_name!("disabled"),
+                    value: value.into(),
+                }],
+            );
+            let last = mutator.create_element(qual_name!("input"), vec![]);
+            mutator.append_children(body, &[enabled, disabled, last]);
+            mutator.append_children(html, &[body]);
+            mutator.append_children(root, &[html]);
+            drop(mutator);
 
-        assert!(doc.set_focus_to(enabled));
-        assert!(!doc.set_focus_to(disabled));
-        assert_eq!(doc.get_focussed_node_id(), Some(enabled));
-        assert!(doc.nodes[enabled].is_focussed());
-        assert!(!doc.nodes[disabled].is_focussed());
-        assert!(
-            doc.nodes[body]
-                .element_data()
-                .unwrap()
-                .element_state
-                .contains(ElementState::FOCUS_WITHIN)
-        );
+            assert!(doc.set_focus_to(enabled));
+            assert_eq!(doc.focus_next_node(), Some(last));
+            assert_eq!(doc.get_focussed_node_id(), Some(last));
+            assert_eq!(doc.focus_prev_node(), Some(enabled));
+            assert_eq!(doc.get_focussed_node_id(), Some(enabled));
+            assert!(!doc.set_focus_to(disabled));
+            assert_eq!(doc.get_focussed_node_id(), Some(enabled));
+            assert!(doc.nodes[enabled].is_focussed());
+            assert!(!doc.nodes[disabled].is_focussed());
+            assert!(
+                !doc.nodes[disabled]
+                    .element_data()
+                    .unwrap()
+                    .element_state
+                    .contains(ElementState::FOCUS_WITHIN)
+            );
+            assert!(
+                doc.nodes[body]
+                    .element_data()
+                    .unwrap()
+                    .element_state
+                    .contains(ElementState::FOCUS_WITHIN)
+            );
 
-        doc.mutate()
-            .clear_attribute(disabled, qual_name!("disabled"));
-        assert!(doc.set_focus_to(disabled));
-        assert_eq!(doc.get_focussed_node_id(), Some(disabled));
-        assert!(!doc.nodes[enabled].is_focussed());
+            doc.mutate()
+                .clear_attribute(disabled, qual_name!("disabled"));
+            assert_eq!(doc.focus_next_node(), Some(disabled));
+            assert_eq!(doc.get_focussed_node_id(), Some(disabled));
+            assert!(!doc.nodes[enabled].is_focussed());
+        }
     }
 }
