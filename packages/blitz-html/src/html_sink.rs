@@ -54,6 +54,7 @@ pub struct DocumentHtmlParser<'m, 'doc> {
     /// The document's quirks mode.
     pub quirks_mode: Cell<QuirksMode>,
     pub is_xml: bool,
+    apply_document_quirks: bool,
 }
 
 impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
@@ -71,6 +72,7 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
             errors: RefCell::new(Vec::new()),
             quirks_mode: Cell::new(QuirksMode::NoQuirks),
             is_xml: false,
+            apply_document_quirks: false,
         }
     }
 
@@ -102,6 +104,7 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
             // Parse as HTML
             let mut sink = DocumentHtmlParser::new(mutr);
             sink.is_xml = false;
+            sink.apply_document_quirks = true;
             let opts = ParseOpts {
                 tokenizer: TokenizerOpts::default(),
                 tree_builder: TreeBuilderOpts {
@@ -179,6 +182,15 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
         Self: 'a;
 
     fn finish(self) -> Self::Output {
+        // Standards-mode tables inherit line-height. Only full documents without
+        // a standards doctype get the legacy reset; parsing innerHTML must not
+        // change the containing document's UA rules. This is the table reset,
+        // not propagation of all quirks-mode behavior into style/layout.
+        if self.apply_document_quirks && self.quirks_mode.get() == QuirksMode::Quirks {
+            self.mutr()
+                .doc
+                .add_user_agent_stylesheet("table { line-height: normal; }");
+        }
         #[cfg(feature = "tracing")]
         for error in self.errors.borrow().iter() {
             tracing::error!("{error}");

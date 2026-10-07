@@ -427,7 +427,6 @@ plaintext {
 
 table {
     display: table;
-    line-height: normal;
     border-spacing: 2px;
     border-collapse: separate;
     /* XXXldb do we want this if we're border-collapse:collapse ? */
