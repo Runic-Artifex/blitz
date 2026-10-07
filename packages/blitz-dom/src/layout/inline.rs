@@ -388,14 +388,16 @@ impl BaseDocument {
                 DisplayInside::Flow | DisplayInside::FlowRoot
             );
             let is_scroll_container = !matches!(overflow.y, Overflow::Visible | Overflow::Clip);
-            // Text controls export their editor baseline even when their
-            // internal text scrolls. They are replaced controls, not ordinary
-            // flow-root boxes subject to CSS 2's overflow baseline rule.
-            let is_text_control = self.nodes[NodeId::from_u64(ibox.id)]
+            // Single-line inputs export their editor baseline even when their
+            // internal text scrolls. Textareas keep their editor baseline for
+            // flex/grid alignment, but inline flow applies the overflow rule
+            // and aligns their bottom margin edge instead.
+            let is_single_line_text_control = self.nodes[NodeId::from_u64(ibox.id)]
                 .element_data()
-                .is_some_and(|e| e.text_input_data().is_some());
+                .and_then(|e| e.text_input_data())
+                .is_some_and(|input| !input.is_multiline);
             let is_block_axis_scroll_container =
-                is_flow && is_scroll_container && !is_button && !is_text_control;
+                is_flow && is_scroll_container && !is_button && !is_single_line_text_control;
             // (`contain: layout`, or a size query container.)
             let contain_layout = style.contain().contains(taffy::Contain::LAYOUT);
             let exports_baseline = !is_block_axis_scroll_container && !contain_layout;

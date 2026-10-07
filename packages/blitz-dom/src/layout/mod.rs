@@ -346,12 +346,6 @@ impl BaseDocument {
                             height: resolved_line_height.unwrap_or(16.0) * rows,
                         },
                     );
-                    // Blink exports the textarea inner editor's first-line
-                    // baseline from its padding edge. A textarea without that
-                    // baseline sits its bottom on the surrounding line and
-                    // inflates the line beyond its own border-box height.
-                    let baseline =
-                        textarea_baseline(node, self.viewport.scale(), inputs.parent_size.width);
                     if inputs.run_mode == RunMode::PerformLayout {
                         let pb = {
                             let style = node.layout_style();
@@ -364,7 +358,6 @@ impl BaseDocument {
                         };
                         let content_width = (output.size.width - pb.horizontal_axis_sum()).max(0.0);
                         let scale = self.viewport.scale();
-                        let node = &mut self.nodes[dom_node_id(node_id)];
                         if let Some(input) = node
                             .data
                             .downcast_element_mut()
@@ -377,7 +370,12 @@ impl BaseDocument {
                             );
                         }
                     }
-                    output.baselines.first = baseline;
+                    // Flex/grid baseline alignment uses the editor's first
+                    // line. Inline flow uses the last line for a non-scrolling
+                    // flow-root, or separately synthesizes its bottom margin
+                    // edge for a scrolling textarea.
+                    output.baselines =
+                        textarea_baselines(node, self.viewport.scale(), inputs.parent_size.width);
                     return output;
                 }
 
@@ -1058,12 +1056,23 @@ fn text_input_baseline(
     Some(pb.top + offset + line.metrics().baseline / scale)
 }
 
-/// The baseline of a textarea is its inner editor's first line, positioned at
-/// the start padding edge. Unlike a single-line input, a textarea does not
-/// vertically centre its editor in unused content height.
-fn textarea_baseline(node: &Node, scale: f32, parent_width: Option<f32>) -> Option<f32> {
-    let input = node.element_data()?.text_input_data()?;
-    let line = input.editor.try_layout()?.lines().next()?;
+/// Textarea editor baselines at the start padding edge. Flex/grid use the
+/// first; inline flow uses the last for a non-scrolling flow-root and
+/// synthesizes the bottom margin edge for a scrolling one. Unlike a single-line
+/// input, a textarea does not vertically centre its editor in unused content
+/// height.
+fn textarea_baselines(node: &Node, scale: f32, parent_width: Option<f32>) -> taffy::Baselines {
+    let Some(input) = node.element_data().and_then(|data| data.text_input_data()) else {
+        return taffy::Baselines::NONE;
+    };
+    let Some(layout) = input.editor.try_layout() else {
+        return taffy::Baselines::NONE;
+    };
+    let mut lines = layout.lines();
+    let Some(first) = lines.next() else {
+        return taffy::Baselines::NONE;
+    };
+    let last = lines.last().unwrap_or(first);
     let style = node.layout_style();
     let pb = style
         .padding()
@@ -1071,5 +1080,8 @@ fn textarea_baseline(node: &Node, scale: f32, parent_width: Option<f32>) -> Opti
         + style
             .border()
             .resolve_or_zero(parent_width, resolve_calc_value);
-    Some(pb.top + line.metrics().baseline / scale)
+    taffy::Baselines {
+        first: Some(pb.top + first.metrics().baseline / scale),
+        last: Some(pb.top + last.metrics().baseline / scale),
+    }
 }
