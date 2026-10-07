@@ -45,62 +45,6 @@ use peniko::{self, Fill, ImageData, ImageSampler};
 use style::values::generics::color::GenericColor;
 use taffy::Layout;
 
-/// A view of the track positions reported by taffy in physical (left-to-right /
-/// top-to-bottom) order. Taffy reports tracks in logical order, which for RTL grid
-/// containers is physically reversed.
-#[derive(Clone, Copy)]
-pub(crate) struct PhysicalTracks<'a> {
-    positions: &'a [taffy::Line<f32>],
-    reversed: bool,
-}
-
-impl<'a> PhysicalTracks<'a> {
-    pub(crate) fn from_tracks<S: taffy::CheapCloneStr>(
-        tracks: &'a taffy::DetailedGridTracksInfo<S>,
-    ) -> Self {
-        let positions = tracks.positions.as_slice();
-        let reversed = positions
-            .first()
-            .zip(positions.last())
-            .is_some_and(|(first, last)| first.start > last.start);
-        Self {
-            positions,
-            reversed,
-        }
-    }
-
-    fn get(self, index: usize) -> taffy::Line<f32> {
-        if self.reversed {
-            self.positions[self.positions.len() - 1 - index]
-        } else {
-            self.positions[index]
-        }
-    }
-
-    /// Iterate track positions in physical order
-    pub(crate) fn iter(self) -> impl ExactSizeIterator<Item = taffy::Line<f32>> + 'a {
-        (0..self.positions.len()).map(move |index| self.get(index))
-    }
-
-    /// The physical start position of the first track
-    pub(crate) fn origin(self) -> f32 {
-        if self.positions.is_empty() {
-            0.0
-        } else {
-            self.get(0).start
-        }
-    }
-
-    /// Total distance from the start of the first track to the end of the last track
-    pub(crate) fn span(self) -> f32 {
-        if self.positions.is_empty() {
-            0.0
-        } else {
-            self.get(self.positions.len() - 1).end - self.get(0).start
-        }
-    }
-}
-
 /// A short-lived struct which holds a bunch of parameters for rendering a scene so
 /// that we don't have to pass them down as parameters
 pub struct BlitzDomPainter<'dom, 'a> {
@@ -404,7 +348,21 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
         // Apply CSS transform property (where transforms are 2d)
 
-        let mut cx = self.element_cx(node, *node.final_layout(), transform, custom_widget_scene);
+        let mut decoration_layout = *node.final_layout();
+        let mut decoration_transform = transform;
+        if let Some(element) = node.element_data()
+            && let blitz_dom::node::SpecialElementData::TableRoot(table) = &element.special_data
+        {
+            let grid = table.grid_rect.borrow();
+            decoration_layout.size = grid.size;
+            decoration_transform *= Affine::translate((0.0, grid.location.y as f64 * self.scale));
+        }
+        let mut cx = self.element_cx(
+            node,
+            decoration_layout,
+            decoration_transform,
+            custom_widget_scene,
+        );
 
         // If this element clips its overflow it establishes a scrollport: narrow the clip
         // rectangle passed to descendants to the visible (clipped) region so that content
@@ -572,7 +530,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                                     y: content_position.y - node.scroll_offset().y,
                                 };
 
-                                cx.transform = cx.transform.then_translate(Vec2 {
+                                cx.transform = transform.then_translate(Vec2 {
                                     x: -node.scroll_offset().x * self.scale,
                                     y: -node.scroll_offset().y * self.scale,
                                 });

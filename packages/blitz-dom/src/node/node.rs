@@ -93,6 +93,9 @@ pub struct Node {
     pub children: ThinVec<NodeId>,
     /// Our parent in the layout hierachy: a separate list that includes anonymous collections of inline elements
     pub layout_parent: Cell<Option<NodeId>>,
+    /// Used collapsed borders resolved by the table formatting context.
+    pub table_cell_border: Cell<Option<taffy::Rect<f32>>>,
+    pub table_cell_outer: Cell<taffy::Point<bool>>,
     /// A separate child list that includes anonymous collections of inline elements
     pub layout_children: RefCell<Option<ThinVec<NodeId>>>,
     /// Out-of-flow (absolutely/fixed positioned) boxes for which this node is the
@@ -411,6 +414,8 @@ impl Node {
             parent: None,
             children: ThinVec::new(),
             layout_parent: Cell::new(None),
+            table_cell_border: Cell::new(None),
+            table_cell_outer: Cell::new(taffy::Point { x: false, y: false }),
             oof_containing_block: Cell::new(None),
             layout_children: RefCell::new(None),
             hoisted_children: RefCell::new(ThinVec::new()),
@@ -1185,7 +1190,14 @@ impl Node {
             }
         }
 
-        stylo_taffy::TaffyStyloStyle::new(styles, flags)
+        let collapsed = styles.clone_display().inside() == DisplayInside::TableCell
+            && styles.clone_border_collapse()
+                == style::computed_values::border_collapse::T::Collapse;
+        stylo_taffy::TaffyStyloStyle::new(styles, flags).with_table_cell_border(if collapsed {
+            self.table_cell_border.get()
+        } else {
+            None
+        })
     }
 
     /// The node's `display` as a [`taffy::Display`]. Returns [`taffy::Display::Block`]
@@ -1434,8 +1446,26 @@ impl Node {
         let box_x = x - self.scroll_offset().x as f32;
         let box_y = y - self.scroll_offset().y as f32;
         let size = self.final_layout().size;
-        let matches_self =
-            !(box_x < 0.0 || box_x > size.width || box_y < 0.0 || box_y > size.height);
+        let is_table_cell = self
+            .display_style()
+            .is_some_and(|d| d.inside() == DisplayInside::TableCell);
+        let matches_self = if is_table_cell {
+            let collapsed = self.primary_styles().is_some_and(|s| {
+                s.clone_border_collapse() == style::computed_values::border_collapse::T::Collapse
+            });
+            let inset = if collapsed {
+                self.final_layout().border
+            } else {
+                taffy::Rect::ZERO
+            };
+            let outer = self.table_cell_outer.get();
+            box_x >= if outer.x { -inset.left.fract() } else { 0.0 }
+                && box_x < size.width
+                && box_y >= if outer.y { -inset.top.fract() } else { 0.0 }
+                && box_y < size.height
+        } else {
+            !(box_x < 0.0 || box_x > size.width || box_y < 0.0 || box_y > size.height)
+        };
 
         let overflow_rect = self.final_layout().scrollable_overflow_rect;
         let matches_content = !(x < 0.0
@@ -1462,7 +1492,23 @@ impl Node {
             && y >= (overflow.y0 / scale) as f32
             && y <= (overflow.y1 / scale) as f32;
 
-        if !matches_self && !matches_content && !matches_hoisted_content && !matches_overflow {
+        let internal_table = self.display_style().is_some_and(|d| {
+            matches!(
+                d.inside(),
+                DisplayInside::TableRow
+                    | DisplayInside::TableRowGroup
+                    | DisplayInside::TableHeaderGroup
+                    | DisplayInside::TableFooterGroup
+            )
+        });
+        // Collapsed cell borders can paint outside the row/group track box.
+        // Test descendants there before rejecting an internal table box.
+        if !internal_table
+            && !matches_self
+            && !matches_content
+            && !matches_hoisted_content
+            && !matches_overflow
+        {
             return None;
         }
 
@@ -1570,8 +1616,11 @@ impl Node {
             }
         }
 
+        // A cluster at the edge of a table cell's line must not extend the
+        // cell's hit area into border-spacing or the outside collapsed border.
+        // Overflowing descendant boxes are still tested above.
         // Inline children
-        if self.flags.is_inline_root() {
+        if self.flags.is_inline_root() && (!is_table_cell || matches_self) {
             let element_data = &self.element_data().unwrap();
             if let Some(ild) = element_data.inline_layout_data.as_ref() {
                 let layout = &ild.layout;
@@ -1597,8 +1646,11 @@ impl Node {
             }
         }
 
+        // Row/group boxes provide geometry and bubble events from cells, but
+        // border-spacing belongs to the table. In particular a later row must
+        // not intercept a rowspan cell originating in an earlier row.
         // Self (this node)
-        if matches_self && !pointer_events_none {
+        if !internal_table && matches_self && !pointer_events_none {
             return Some(HitResult {
                 node_id: self.id,
                 x,

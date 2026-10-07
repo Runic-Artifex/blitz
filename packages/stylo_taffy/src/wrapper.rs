@@ -40,12 +40,25 @@ pub struct TaffyStyloStyle<T: Deref<Target = ComputedValues>> {
     pub style: T,
     /// Extra node-derived flags that are not part of the stylo style
     pub flags: StyleFlags,
+    pub table_cell_border: Option<taffy::Rect<f32>>,
 }
 
 impl<T: Deref<Target = ComputedValues>> TaffyStyloStyle<T> {
     /// Create a new [`TaffyStyloStyle`] from a stylo style and [`StyleFlags`]
     pub fn new(style: T, flags: StyleFlags) -> Self {
-        Self { style, flags }
+        Self {
+            style,
+            flags,
+            table_cell_border: None,
+        }
+    }
+}
+
+impl<T: Deref<Target = ComputedValues>> TaffyStyloStyle<T> {
+    /// Override the computed border with table-resolved half borders.
+    pub fn with_table_cell_border(mut self, border: Option<taffy::Rect<f32>>) -> Self {
+        self.table_cell_border = border;
+        self
     }
 }
 
@@ -55,6 +68,7 @@ impl<T: Deref<Target = ComputedValues>> From<T> for TaffyStyloStyle<T> {
         Self {
             style: value,
             flags: StyleFlags::empty(),
+            table_cell_border: None,
         }
     }
 }
@@ -198,8 +212,11 @@ impl<T: Deref<Target = ComputedValues>> taffy::CoreStyle for TaffyStyloStyle<T> 
 
     #[inline]
     fn border(&self) -> taffy::Rect<taffy::LengthPercentage> {
+        if let Some(border) = self.table_cell_border {
+            return border.map(taffy::style_helpers::length);
+        }
         let border_styles = self.style.get_border();
-        taffy::Rect {
+        let border = taffy::Rect {
             left: convert::border(
                 &border_styles.border_left_width,
                 border_styles.border_left_style,
@@ -216,6 +233,15 @@ impl<T: Deref<Target = ComputedValues>> taffy::CoreStyle for TaffyStyloStyle<T> 
                 &border_styles.border_bottom_width,
                 border_styles.border_bottom_style,
             ),
+        };
+        if self.style.clone_display().inside()
+            == style::values::specified::box_::DisplayInside::TableCell
+            && self.style.clone_border_collapse()
+                == style::computed_values::border_collapse::T::Collapse
+        {
+            border.map(|side| taffy::style_helpers::length(side.into_raw().value() / 2.0))
+        } else {
+            border
         }
     }
 }

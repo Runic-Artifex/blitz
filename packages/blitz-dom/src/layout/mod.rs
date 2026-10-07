@@ -32,7 +32,7 @@ pub(crate) mod table;
 use self::replaced::{
     IntrinsicSizes, ReplacedContext, compute_replaced_layout, is_replaced_element,
 };
-use self::table::TableTreeWrapper;
+use self::table::compute_table_layout;
 
 /// The default object size for replaced elements
 /// (https://drafts.csswg.org/css-images/#default-object-size).
@@ -549,15 +549,11 @@ impl BaseDocument {
                     };
                     let context = Arc::clone(context);
 
-                    let mut table_wrapper = TableTreeWrapper {
-                        doc: self,
-                        ctx: context,
-                    };
-                    let mut output = compute_grid_layout(&mut table_wrapper, node_id, inputs);
+                    let mut output =
+                        compute_table_layout(self, node_id, inputs, Arc::clone(&context));
 
                     // Absolutely positioned children take no part in the table grid. Their
                     // static position is the top-left of the table's content box.
-                    let context = table_wrapper.ctx;
                     if inputs.run_mode == RunMode::PerformLayout && !context.oof_children.is_empty()
                     {
                         let style = &context.style;
@@ -870,7 +866,25 @@ impl RoundTree for BaseDocument {
     }
 
     fn set_final_layout(&mut self, node_id: NodeId, layout: &Layout) {
-        *self.node_from_id_mut(node_id).final_layout_mut() = *layout;
+        // Table tracks and collapsed half-borders retain LayoutUnit precision.
+        // Rounding each internal box to device pixels changes both text placement
+        // and which cell receives a hit at a shared boundary.
+        let mut ancestor = Some(dom_node_id(node_id));
+        let mut in_table = false;
+        while let Some(id) = ancestor {
+            let node = &self.nodes[id];
+            if node.flags.is_table_root() {
+                in_table = true;
+                break;
+            }
+            ancestor = node.layout_parent.get();
+        }
+        let used = if in_table {
+            *self.node_from_id(node_id).unrounded_layout()
+        } else {
+            *layout
+        };
+        *self.node_from_id_mut(node_id).final_layout_mut() = used;
     }
 
     fn is_out_of_flow(&self, node_id: NodeId) -> bool {

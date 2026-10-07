@@ -11,7 +11,7 @@ use style::{
 use crate::{
     color::{ToColorColor as _, contrast_ratio},
     kurbo_css::Edge,
-    render::{ElementCx, PhysicalTracks},
+    render::ElementCx,
 };
 
 /// A darker version of a colour (mirrors WebKit/Blink's `Color::Dark`): the
@@ -147,6 +147,19 @@ fn sample_points_along_path(path: &BezPath, spacing: f64, count: usize) -> Vec<P
 impl ElementCx<'_, '_> {
     /// Draw all borders for a node
     pub(crate) fn draw_border(&self, scene: &mut impl PaintScene) {
+        use style::values::specified::box_::DisplayInside;
+        let display = self.style.clone_display().inside();
+        if matches!(
+            display,
+            DisplayInside::TableRow
+                | DisplayInside::TableRowGroup
+                | DisplayInside::TableHeaderGroup
+                | DisplayInside::TableFooterGroup
+        ) || (matches!(display, DisplayInside::Table | DisplayInside::TableCell)
+            && self.style.clone_border_collapse() == BorderCollapse::Collapse)
+        {
+            return;
+        }
         let style = &*self.style;
         let border = style.get_border();
         let current_color = style.clone_color();
@@ -521,69 +534,123 @@ impl ElementCx<'_, '_> {
         let Some(grid_info) = &mut *table.computed_grid_info.borrow_mut() else {
             return;
         };
-        let Some(border_style) = table.border_style.as_deref() else {
+        let cols = &grid_info.columns.positions;
+        let rows = &grid_info.rows.positions;
+        if cols.is_empty() || rows.is_empty() {
             return;
-        };
-
-        let outer_border_style = self.style.get_border();
-
-        let cols = PhysicalTracks::from_tracks(&grid_info.columns);
-        let rows = PhysicalTracks::from_tracks(&grid_info.rows);
-
-        // TODO: support different colors for different borders
-        let current_color = self.style.clone_color();
-        let border_color = border_style
-            .border_top_color
-            .resolve_to_absolute(&current_color)
+        }
+        let rtl = table.style.direction == taffy::Direction::Rtl;
+        let mut segments = Vec::new();
+        for (line, borders) in table.horizontal_borders.iter().enumerate() {
+            let y = if line == 0 {
+                rows[0].start
+            } else {
+                rows[line - 1].end
+            };
+            for (col, border) in borders.iter().enumerate() {
+                if let Some(border) = border {
+                    segments.push((*border, true, y, cols[col].start, cols[col].end));
+                }
+            }
+        }
+        for (row, borders) in table.vertical_borders.iter().enumerate() {
+            for (line, border) in borders.iter().enumerate() {
+                let x = if rtl {
+                    if line == 0 {
+                        cols[0].end
+                    } else {
+                        cols[line - 1].start
+                    }
+                } else {
+                    if line == 0 {
+                        cols[0].start
+                    } else {
+                        cols[line - 1].end
+                    }
+                };
+                if let Some(border) = border {
+                    segments.push((*border, false, x, rows[row].start, rows[row].end));
+                }
+            }
+        }
+        segments.sort_by(|a, b| a.0.width.total_cmp(&b.0.width));
+        for (border, horizontal, line, start, end) in segments {
+            if border.style.none_or_hidden() || border.width == 0.0 {
+                continue;
+            }
+            let node = self.context.dom.get_node(border.node_id).unwrap();
+            let styles = node.primary_styles().unwrap();
+            let bs = styles.get_border();
+            let color = match border.side {
+                0 => &bs.border_top_color,
+                1 => &bs.border_right_color,
+                2 => &bs.border_bottom_color,
+                _ => &bs.border_left_color,
+            }
+            .resolve_to_absolute(&styles.clone_color())
             .as_srgb_color();
-
-        // No need to draw transparent borders (as they won't be visible anyway)
-        if border_color == Color::TRANSPARENT {
-            return;
-        }
-
-        // Border widths are not adjusted for border-style in computed styles,
-        // so a border with `none`/`hidden` style must be treated as zero-width.
-        if border_style.border_top_style.none_or_hidden() {
-            return;
-        }
-
-        // The borders are laid out as the gutters between the tracks, and as the border
-        // of the table around them. Track positions are relative to the table's border box.
-        let border_width = table.style.gap.map(|gap| gap.into_raw().value() as f64);
-        let left = cols.origin() as f64 - border_width.width;
-        let right = (cols.origin() + cols.span()) as f64 + border_width.width;
-        let top = rows.origin() as f64 - border_width.height;
-        let bottom = (rows.origin() + rows.span()) as f64 + border_width.height;
-
-        let mut fill = |x0: f64, y0: f64, x1: f64, y1: f64| {
-            let shape = Rect::new(x0, y0, x1, y1).scale_from_origin(self.scale);
-            scene.fill(Fill::NonZero, self.transform, border_color, None, &shape);
-        };
-
-        // Horizontal borders: the outer edges, then the gutters between adjacent row tracks.
-        // The vertical borders are drawn between them so that no corner is painted twice.
-        if outer_border_style.border_top_style != BorderStyle::Hidden {
-            fill(left, top, right, top + border_width.height);
-        }
-        if outer_border_style.border_bottom_style != BorderStyle::Hidden {
-            fill(left, bottom - border_width.height, right, bottom);
-        }
-        for (prev, next) in rows.iter().zip(rows.iter().skip(1)) {
-            fill(left, prev.end as f64, right, next.start as f64);
-        }
-
-        // Vertical borders, one segment per row
-        for row in rows.iter() {
-            let (y0, y1) = (row.start as f64, row.end as f64);
-            if outer_border_style.border_left_style != BorderStyle::Hidden {
-                fill(left, y0, left + border_width.width, y1);
-            }
-            if outer_border_style.border_right_style != BorderStyle::Hidden {
-                fill(right - border_width.width, y0, right, y1);
-            }
-            for (prev, next) in cols.iter().zip(cols.iter().skip(1)) {
-                fill(prev.end as f64, y0, next.start as f64, y1);
+            let width = border.width as f64;
+            let half = width / 2.0;
+            let (line, start, end) = (line as f64, start as f64, end as f64);
+            let rectangle = |lo: f64, hi: f64| {
+                if horizontal {
+                    Rect::new(start - half, line + lo, end + half, line + hi)
+                } else {
+                    Rect::new(line + lo, start - half, line + hi, end + half)
+                }
+                .scale_from_origin(self.scale)
+            };
+            match border.style {
+                BorderStyle::Dashed | BorderStyle::Dotted => {
+                    let (a, b) = if horizontal {
+                        (Point::new(start, line), Point::new(end, line))
+                    } else {
+                        (Point::new(line, start), Point::new(line, end))
+                    };
+                    let mut stroke = Stroke::new(width * self.scale);
+                    if border.style == BorderStyle::Dotted {
+                        stroke = stroke
+                            .with_caps(Cap::Round)
+                            .with_dashes(0.0, [0.0, width * 2.0 * self.scale]);
+                    } else {
+                        stroke = stroke
+                            .with_dashes(0.0, [width * 3.0 * self.scale, width * 3.0 * self.scale]);
+                    }
+                    scene.stroke(
+                        &stroke,
+                        self.transform,
+                        color,
+                        None,
+                        &kurbo::Line::new(
+                            (a.to_vec2() * self.scale).to_point(),
+                            (b.to_vec2() * self.scale).to_point(),
+                        ),
+                    );
+                }
+                BorderStyle::Double if width >= 3.0 => {
+                    let third = (width / 3.0).round();
+                    scene.fill(
+                        Fill::NonZero,
+                        self.transform,
+                        color,
+                        None,
+                        &rectangle(-half, -half + third),
+                    );
+                    scene.fill(
+                        Fill::NonZero,
+                        self.transform,
+                        color,
+                        None,
+                        &rectangle(half - third, half),
+                    );
+                }
+                _ => scene.fill(
+                    Fill::NonZero,
+                    self.transform,
+                    color,
+                    None,
+                    &rectangle(-half, half),
+                ),
             }
         }
     }

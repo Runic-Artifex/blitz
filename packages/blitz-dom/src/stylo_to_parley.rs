@@ -355,6 +355,9 @@ pub(crate) fn vertical_align(
     style: &stylo::ComputedValues,
     parent_font_size: Option<f32>,
 ) -> parley::VerticalAlign {
+    if style.clone_display().inside() == style::values::specified::box_::DisplayInside::TableCell {
+        return parley::VerticalAlign::BASELINE;
+    }
     let box_styles = style.get_box();
     let alignment = match box_styles.clone_alignment_baseline() {
         stylo::AlignmentBaseline::Baseline => parley::AlignmentBaseline::Baseline,

@@ -134,6 +134,18 @@ impl<'a> ImageLayerStyles<'a> {
 
 impl ElementCx<'_, '_> {
     pub(super) fn draw_background(&self, scene: &mut impl PaintScene) {
+        // Internal table backgrounds are painted behind each cell by the table
+        // root; painting their new hit-test boxes would fill border-spacing.
+        use style::values::specified::box_::DisplayInside;
+        if matches!(
+            self.style.clone_display().inside(),
+            DisplayInside::TableRow
+                | DisplayInside::TableRowGroup
+                | DisplayInside::TableHeaderGroup
+                | DisplayInside::TableFooterGroup
+        ) {
+            return;
+        }
         let bg_styles = &self.style.get_background();
         let image_data = &self.element.background_images;
         let layer_count = bg_styles.background_image.0.len();
@@ -272,12 +284,27 @@ impl ElementCx<'_, '_> {
         }
 
         let cell_rect = |cell_id: NodeId| -> Option<Rect> {
-            let layout = self.context.dom.get_node(cell_id)?.final_layout();
+            let cell = self.context.dom.get_node(cell_id)?;
+            let layout = cell.final_layout();
+            let mut x = layout.location.x;
+            let mut y = layout.location.y;
+            let mut parent = cell.layout_parent.get();
+            while let Some(id) = parent {
+                if id == self.node.id {
+                    break;
+                }
+                let node = self.context.dom.get_node(id)?;
+                x += node.final_layout().location.x;
+                y += node.final_layout().location.y;
+                parent = node.layout_parent.get();
+            }
+            // This context is translated to the grid box, below top captions.
+            y -= table.grid_rect.borrow().location.y;
             Some(Rect::new(
-                layout.location.x as f64,
-                layout.location.y as f64,
-                (layout.location.x + layout.size.width) as f64,
-                (layout.location.y + layout.size.height) as f64,
+                x as f64,
+                y as f64,
+                (x + layout.size.width) as f64,
+                (y + layout.size.height) as f64,
             ))
         };
 
@@ -595,12 +622,8 @@ impl ElementCx<'_, '_> {
         let tile_rect = Rect::new(0.0, 0.0, x.rect_len, y.rect_len);
         let current_color = self.style.clone_color();
 
-        let (gradient, gradient_transform) = to_peniko_gradient(
-            gradient,
-            tile_rect,
-            self.scale,
-            &current_color,
-        );
+        let (gradient, gradient_transform) =
+            to_peniko_gradient(gradient, tile_rect, self.scale, &current_color);
         let brush = anyrender::Paint::Gradient(&gradient);
 
         let transform = base_transform.then_translate(Vec2 {
