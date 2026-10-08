@@ -2040,9 +2040,11 @@ impl BaseDocument {
             return (None, None);
         }
         let mut scrollbar = None;
-        let hit = self
-            .root_element()
-            .hit_inner(x, y, self.viewport().scale_f64(), &mut scrollbar);
+        let hit = self.root_element().hit_inner(
+            crate::hit_geometry::HitLocation::new(x, y),
+            self.viewport().scale_f64(),
+            &mut scrollbar,
+        );
         (hit, scrollbar)
     }
 

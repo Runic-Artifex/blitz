@@ -1,4 +1,5 @@
 use crate::Document;
+use crate::hit_geometry::HitLocation;
 use crate::layout::paint_tree::{HoistedPaintChild, StackingContext};
 use bitflags::bitflags;
 use blitz_traits::events::{
@@ -1371,7 +1372,7 @@ impl Node {
     /// TODO: z-index
     /// (If multiple children are positioned at the position then a random one will be recursed into)
     pub fn hit(&self, x: f32, y: f32, scale: f64) -> Option<HitResult> {
-        self.hit_inner(x, y, scale, &mut None)
+        self.hit_inner(HitLocation::new(x, y), scale, &mut None)
     }
 
     /// Whether this node clips its descendants: to its content box for text
@@ -1418,8 +1419,7 @@ impl Node {
     /// included — of every other hit test).
     pub(crate) fn hit_inner(
         &self,
-        x: f32,
-        y: f32,
+        location: HitLocation,
         scale: f64,
         scrollbar: &mut Option<crate::node::ScrollbarRef>,
     ) -> Option<HitResult> {
@@ -1442,19 +1442,16 @@ impl Node {
             .primary_styles()
             .is_some_and(|style| style.clone_pointer_events() == PointerEvents::None);
 
-        let location = self.visual_location();
-        let mut x = x - location.x + self.scroll_offset().x as f32;
-        let mut y = y - location.y + self.scroll_offset().y as f32;
-
+        let position = self.visual_location();
+        let mut box_location = location.translated(-f64::from(position.x), -f64::from(position.y));
         if let Some(t) = self.transform().as_deref() {
-            let p = t.inverse() * kurbo::Point::new(x as f64 * scale, y as f64 * scale);
-            x = (p.x / scale) as f32;
-            y = (p.y / scale) as f32;
+            box_location = box_location.inverse_transform(*t, scale)?;
         }
-
-        // The point in this node's unscrolled border-box coordinates.
-        let box_x = x - self.scroll_offset().x as f32;
-        let box_y = y - self.scroll_offset().y as f32;
+        // Inverse-map the border-box query before moving into scrolled content.
+        // Recreating a unit footprint here would change it under CSS transforms.
+        let location = box_location.translated(self.scroll_offset().x, self.scroll_offset().y);
+        let mut x = location.point().x as f32;
+        let mut y = location.point().y as f32;
         let size = self.final_layout().size;
         let is_table_cell = self
             .display_style()
@@ -1469,26 +1466,43 @@ impl Node {
                 taffy::Rect::ZERO
             };
             let outer = self.table_cell_outer.get();
-            box_x >= if outer.x { -inset.left.fract() } else { 0.0 }
-                && box_x < size.width
-                && box_y >= if outer.y { -inset.top.fract() } else { 0.0 }
-                && box_y < size.height
+            box_location.intersects_rect(KurboRect::new(
+                if outer.x {
+                    -inset.left.fract() as f64
+                } else {
+                    0.0
+                },
+                if outer.y {
+                    -inset.top.fract() as f64
+                } else {
+                    0.0
+                },
+                size.width as f64,
+                size.height as f64,
+            ))
         } else {
-            self.rounded_box_contains(box_x, box_y, taffy::Rect::ZERO)
+            self.rounded_box_intersects(box_location, taffy::Rect::ZERO)
         };
 
         let overflow_rect = self.final_layout().scrollable_overflow_rect;
-        let matches_content = !(x < 0.0
-            || x > overflow_rect.right + self.scroll_offset().x as f32
-            || y < 0.0
-            || y > overflow_rect.bottom + self.scroll_offset().y as f32);
+        let matches_content = location.intersects_rect(KurboRect::new(
+            0.0,
+            0.0,
+            overflow_rect.right as f64 + self.scroll_offset().x,
+            overflow_rect.bottom as f64 + self.scroll_offset().y,
+        ));
 
         let matches_hoisted_content = match &self.stacking_context {
             Some(sc) => {
                 // Both the point (after the scroll adjustment above) and the
                 // bbox are in this node's unscrolled content coordinates.
                 let bbox = sc.hoisted_content_bbox(self.tree(), self.id, scale);
-                x >= bbox.left && x <= bbox.right && y >= bbox.top && y <= bbox.bottom
+                location.intersects_rect(KurboRect::new(
+                    bbox.left as f64,
+                    bbox.top as f64,
+                    bbox.right as f64,
+                    bbox.bottom as f64,
+                ))
             }
             None => false,
         };
@@ -1497,10 +1511,12 @@ impl Node {
         // coordinates here are in CSS pixels, so unscale it before comparing.
         let overflow = *self.scrollable_overflow();
 
-        let matches_overflow = x >= (overflow.x0 / scale) as f32
-            && x <= (overflow.x1 / scale) as f32
-            && y >= (overflow.y0 / scale) as f32
-            && y <= (overflow.y1 / scale) as f32;
+        let matches_overflow = location.intersects_rect(KurboRect::new(
+            overflow.x0 / scale,
+            overflow.y0 / scale,
+            overflow.x1 / scale,
+            overflow.y1 / scale,
+        ));
 
         let internal_table = self.display_style().is_some_and(|d| {
             matches!(
@@ -1524,7 +1540,10 @@ impl Node {
 
         // Descendants overwrite, so the innermost scroll container's thumb
         // wins. Thumb coords are border-box relative (unscrolled).
-        if matches_self && let Some(sb) = self.scrollbar_at_local(box_x as f64, box_y as f64) {
+        if matches_self
+            && let Some(sb) =
+                self.scrollbar_at_local(box_location.point().x, box_location.point().y)
+        {
             *scrollbar = Some(sb);
         }
 
@@ -1539,7 +1558,7 @@ impl Node {
             {
                 inset = inset + layout.padding;
             }
-            let inside_clip = self.rounded_box_contains(box_x, box_y, inset);
+            let inside_clip = self.rounded_box_intersects(box_location, inset);
             if !inside_clip {
                 return (matches_self && !pointer_events_none).then_some(HitResult {
                     node_id: self.id,
@@ -1559,15 +1578,14 @@ impl Node {
         if matches_hoisted_content {
             if let Some(hoisted) = &self.stacking_context {
                 for hoisted_child in hoisted.pos_z_hoisted_children().rev() {
-                    if !self.hoisted_clips_contain(hoisted_child, x, y, scale) {
+                    if !self.hoisted_clips_contain(hoisted_child, location, scale) {
                         continue;
                     }
                     let pos = hoisted_child.position(self.tree(), self.id);
-                    let x = x - pos.x;
-                    let y = y - pos.y;
-                    if let Some(hit) = self
-                        .with(hoisted_child.node_id)
-                        .hit_inner(x, y, scale, scrollbar)
+                    let child_location = location.translated(-f64::from(pos.x), -f64::from(pos.y));
+                    if let Some(hit) =
+                        self.with(hoisted_child.node_id)
+                            .hit_inner(child_location, scale, scrollbar)
                     {
                         return Some(hit);
                     }
@@ -1579,22 +1597,21 @@ impl Node {
         for child_id in self.paint_children.borrow().iter().flatten().rev() {
             let child = self.with(*child_id);
             let child_position = child.taffy_position();
-            let mut child_x = x;
-            let mut child_y = y;
+            let mut child_location = location;
             if child_position.is_out_of_flow() {
                 // Fixed-position children of the root element are positioned
                 // against the viewport and do not scroll with it. (A fixed box
                 // whose containing block is a transformed ancestor scrolls with
                 // that ancestor like any other out-of-flow box.)
                 if child_position == taffy::Position::Fixed && self.containing_block().is_none() {
-                    child_x -= self.scroll_offset().x as f32;
-                    child_y -= self.scroll_offset().y as f32;
                     let viewport_scroll = self.tree().viewport_scroll();
-                    child_x -= viewport_scroll.x as f32;
-                    child_y -= viewport_scroll.y as f32;
+                    child_location = child_location.translated(
+                        -self.scroll_offset().x - viewport_scroll.x,
+                        -self.scroll_offset().y - viewport_scroll.y,
+                    );
                 }
             }
-            if let Some(hit) = child.hit_inner(child_x, child_y, scale, scrollbar) {
+            if let Some(hit) = child.hit_inner(child_location, scale, scrollbar) {
                 return Some(hit);
             }
         }
@@ -1603,15 +1620,14 @@ impl Node {
         if matches_hoisted_content {
             if let Some(hoisted) = &self.stacking_context {
                 for hoisted_child in hoisted.neg_z_hoisted_children().rev() {
-                    if !self.hoisted_clips_contain(hoisted_child, x, y, scale) {
+                    if !self.hoisted_clips_contain(hoisted_child, location, scale) {
                         continue;
                     }
                     let pos = hoisted_child.position(self.tree(), self.id);
-                    let x = x - pos.x;
-                    let y = y - pos.y;
-                    if let Some(hit) = self
-                        .with(hoisted_child.node_id)
-                        .hit_inner(x, y, scale, scrollbar)
+                    let child_location = location.translated(-f64::from(pos.x), -f64::from(pos.y));
+                    if let Some(hit) =
+                        self.with(hoisted_child.node_id)
+                            .hit_inner(child_location, scale, scrollbar)
                     {
                         return Some(hit);
                     }
@@ -1628,6 +1644,10 @@ impl Node {
             // locations. Only the text layout uses content-box coordinates.
             x -= content_box_offset.x;
             y -= content_box_offset.y;
+            let text_location = location.translated(
+                -f64::from(content_box_offset.x),
+                -f64::from(content_box_offset.y),
+            );
             let element_data = &self.element_data().unwrap();
             if let Some(ild) = element_data.inline_layout_data.as_ref() {
                 let layout = &ild.layout;
@@ -1649,14 +1669,23 @@ impl Node {
                         else {
                             continue;
                         };
-                        if x * scale < start || x * scale >= end {
-                            continue;
-                        }
                         loop {
                             let target = self.with(node_id);
                             let bounds = ild.span_block_bounds(line, target, self);
-                            let contains_y = bounds.is_some_and(|(top, bottom)| {
-                                y * scale >= top && y * scale < bottom
+                            let contains = bounds.is_some_and(|(top, bottom)| {
+                                let rect = KurboRect::new(
+                                    start as f64 / scale as f64,
+                                    top as f64 / scale as f64,
+                                    end as f64 / scale as f64,
+                                    bottom as f64 / scale as f64,
+                                );
+                                // Text uses snapped bounds; culled inline ancestors
+                                // retain their own raw physical fragment rectangle.
+                                if node_id == run.style().brush.id {
+                                    text_location.intersects_snapped_rect(rect)
+                                } else {
+                                    text_location.intersects_rect(rect)
+                                }
                             });
                             let pointer_events_none =
                                 target.primary_styles().is_some_and(|style| {
@@ -1668,7 +1697,7 @@ impl Node {
                                     Visibility::Hidden | Visibility::Collapse
                                 )
                             });
-                            if contains_y && !pointer_events_none && !hidden {
+                            if contains && !pointer_events_none && !hidden {
                                 text_hit = Some(HitResult {
                                     node_id,
                                     x,

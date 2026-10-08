@@ -5,7 +5,7 @@ use style::values::computed::Overflow;
 use style::values::specified::box_::DisplayOutside;
 use taffy::{MaybeResolve, Point};
 
-use crate::{Node, layout::resolve_calc_value};
+use crate::{Node, hit_geometry::HitLocation, layout::resolve_calc_value};
 
 fn scroll_container(node: &Node) -> bool {
     !node.is_anonymous()
@@ -20,7 +20,11 @@ impl Node {
     /// CSS Backgrounds §4.5 uses one factor for overlapping corner radii.
     /// The padding clip then subtracts the adjacent border widths from each
     /// radius, matching the paths used by Blitz paint.
-    pub(crate) fn rounded_box_contains(&self, x: f32, y: f32, inset: taffy::Rect<f32>) -> bool {
+    pub(crate) fn rounded_box_intersects(
+        &self,
+        location: HitLocation,
+        inset: taffy::Rect<f32>,
+    ) -> bool {
         let size = self.final_layout().size;
         let (left, top, right, bottom) = (
             inset.left,
@@ -28,7 +32,8 @@ impl Node {
             size.width - inset.right,
             size.height - inset.bottom,
         );
-        if x + 1.0 <= left || x >= right || y + 1.0 <= top || y >= bottom {
+        let rect = kurbo::Rect::new(left as f64, top as f64, right as f64, bottom as f64);
+        if !location.intersects_rect(rect) {
             return false;
         }
         let Some(styles) = self.primary_styles() else {
@@ -75,35 +80,21 @@ impl Node {
             radius.0 *= factor;
             radius.1 *= factor;
         }
-        for (i, (rx, ry)) in radii.into_iter().enumerate() {
+        let radii = std::array::from_fn(|i| {
+            let (rx, ry) = radii[i];
             let on_left = i == 0 || i == 3;
             let on_top = i < 2;
             let rx = (rx - if on_left { inset.left } else { inset.right }).max(0.0);
             let ry = (ry - if on_top { inset.top } else { inset.bottom }).max(0.0);
-            if rx == 0.0 || ry == 0.0 {
-                continue;
-            }
-            let cx = if on_left { left + rx } else { right - rx };
-            let cy = if on_top { top + ry } else { bottom - ry };
-            if (if on_left { x < cx } else { x > cx }) && (if on_top { y < cy } else { y > cy }) {
-                // Chromium's point hit test intersects a one-CSS-pixel
-                // rectangle. At a start-side corner its far edge can touch
-                // the curve even when the rectangle's origin is outside it.
-                let dx = ((if on_left { (x + 1.0).min(cx) } else { x }) - cx) / rx;
-                let dy = ((if on_top { (y + 1.0).min(cy) } else { y }) - cy) / ry;
-                if dx * dx + dy * dy > 1.0 {
-                    return false;
-                }
-            }
-        }
-        true
+            (rx as f64, ry as f64)
+        });
+        location.intersects_rounded_rect(rect, radii)
     }
 
     pub(crate) fn hoisted_clips_contain(
         &self,
         child: &crate::HoistedPaintChild,
-        x: f32,
-        y: f32,
+        location: HitLocation,
         scale: f64,
     ) -> bool {
         child
@@ -112,20 +103,17 @@ impl Node {
             .all(|id| {
                 let node = self.with(id);
                 let position = crate::hoisted_child_position(self.tree(), self.id, id);
-                let location = node.visual_location();
-                let point = kurbo::Point::new(
-                    (x - position.x - location.x) as f64 * scale,
-                    (y - position.y - location.y) as f64 * scale,
+                let mut hit = location.translated(
+                    -(position.x + node.visual_location().x) as f64,
+                    -(position.y + node.visual_location().y) as f64,
                 );
-                let point = node
-                    .transform()
-                    .as_deref()
-                    .map_or(point, |t| t.inverse() * point);
-                node.rounded_box_contains(
-                    (point.x / scale) as f32,
-                    (point.y / scale) as f32,
-                    node.final_layout().border,
-                )
+                if let Some(transform) = node.transform().as_deref() {
+                    let Some(transformed) = hit.inverse_transform(*transform, scale) else {
+                        return false;
+                    };
+                    hit = transformed;
+                }
+                node.rounded_box_intersects(hit, node.final_layout().border)
             })
     }
 
