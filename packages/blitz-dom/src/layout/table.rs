@@ -26,6 +26,40 @@ use crate::BaseDocument;
 use super::damage::{CONSTRUCT_BOX, CONSTRUCT_DESCENDENT, CONSTRUCT_FC};
 use super::resolve_calc_value;
 
+/// Table layout snapshots converted geometry and collapsed-border winners during
+/// construction. Refresh those snapshots when their inputs change, while leaving
+/// live paint and vertical-alignment inputs to the normal relayout path.
+pub(super) fn table_snapshot_needs_rebuild(
+    old: &style::properties::ComputedValues,
+    new: &style::properties::ComputedValues,
+) -> bool {
+    let owns_snapshot = |style: &style::properties::ComputedValues| {
+        matches!(
+            style.clone_display().inside(),
+            DisplayInside::Table
+                | DisplayInside::TableCell
+                | DisplayInside::TableRow
+                | DisplayInside::TableRowGroup
+                | DisplayInside::TableHeaderGroup
+                | DisplayInside::TableFooterGroup
+                | DisplayInside::TableColumn
+                | DisplayInside::TableColumnGroup
+        )
+    };
+    if !owns_snapshot(old) && !owns_snapshot(new) {
+        return false;
+    }
+    stylo_taffy::to_taffy_style(old) != stylo_taffy::to_taffy_style(new)
+        || old.clone_table_layout() != new.clone_table_layout()
+        || old.clone_border_collapse() != new.clone_border_collapse()
+        || old.clone_border_spacing() != new.clone_border_spacing()
+        // Equal-width borders can still change the conflict winner by style.
+        || old.clone_border_top_style() != new.clone_border_top_style()
+        || old.clone_border_right_style() != new.clone_border_right_style()
+        || old.clone_border_bottom_style() != new.clone_border_bottom_style()
+        || old.clone_border_left_style() != new.clone_border_left_style()
+}
+
 pub struct TableTreeWrapper<'doc> {
     pub(crate) doc: &'doc mut BaseDocument,
     pub(crate) ctx: Arc<TableContext>,

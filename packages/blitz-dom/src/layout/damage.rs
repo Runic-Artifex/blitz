@@ -284,6 +284,10 @@ pub(crate) fn compute_layout_damage(old: &ComputedValues, new: &ComputedValues) 
             return true;
         }
 
+        if super::table::table_snapshot_needs_rebuild(old, new) {
+            return true;
+        }
+
         if new_box.display.outside() == DisplayOutside::Block
             && new_box.display.inside() == DisplayInside::Flow
         {
@@ -409,6 +413,121 @@ mod tests {
         let mut style = initial.clone();
         style.mutate_box().set_baseline_shift(shift);
         style
+    }
+
+    #[test]
+    fn table_snapshot_geometry_changes_reconstruct_its_owner() {
+        use style::values::computed::{BorderStyle, Display, Size};
+        use style::values::generics::border::GenericBorderSpacing;
+        for display in [
+            Display::Table,
+            Display::TableCell,
+            Display::TableRow,
+            Display::TableRowGroup,
+            Display::TableHeaderGroup,
+            Display::TableFooterGroup,
+            Display::TableColumn,
+            Display::TableColumnGroup,
+        ] {
+            let mut initial = initial_style();
+            initial.mutate_box().set_display(display);
+            let mut height = initial.clone();
+            height
+                .mutate_position()
+                .set_height(Size::LengthPercentage(NonNegative(
+                    LengthPercentage::new_length(Length::new(40.0)),
+                )));
+            let mut padding = initial.clone();
+            padding
+                .mutate_padding()
+                .set_padding_top(NonNegative(LengthPercentage::new_length(Length::new(4.0))));
+            let mut spacing = initial.clone();
+            spacing
+                .mutate_inherited_table()
+                .set_border_spacing(GenericBorderSpacing(
+                    style::values::generics::size::Size2D::new(
+                        NonNegative(Length::new(2.0)),
+                        NonNegative(Length::new(3.0)),
+                    ),
+                ));
+            for changed in [height, padding, spacing] {
+                assert_eq!(
+                    compute_layout_damage(&initial, &changed),
+                    ALL_DAMAGE,
+                    "{display:?}"
+                );
+                assert_eq!(
+                    compute_layout_damage(&changed, &initial),
+                    ALL_DAMAGE,
+                    "{display:?}"
+                );
+            }
+
+            initial
+                .mutate_border()
+                .set_border_top_style(BorderStyle::Solid);
+            let mut dashed = initial.clone();
+            dashed
+                .mutate_border()
+                .set_border_top_style(BorderStyle::Dashed);
+            assert_eq!(
+                stylo_taffy::to_taffy_style(&initial),
+                stylo_taffy::to_taffy_style(&dashed)
+            );
+            assert_eq!(compute_layout_damage(&initial, &dashed), ALL_DAMAGE);
+        }
+    }
+
+    #[test]
+    fn table_live_alignment_and_color_inputs_do_not_reconstruct() {
+        use style::values::computed::Display;
+        for display in [
+            Display::Table,
+            Display::TableCell,
+            Display::TableRow,
+            Display::TableColumn,
+        ] {
+            let mut initial = initial_style();
+            initial.mutate_box().set_display(display);
+            let shifted = with_shift(
+                &initial,
+                BaselineShift::Length(LengthPercentage::new_length(Length::new(3.0))),
+            );
+            let mut middle = initial.clone();
+            middle
+                .mutate_box()
+                .set_alignment_baseline(AlignmentBaseline::Middle);
+            let mut color = initial.clone();
+            color
+                .mutate_inherited_text()
+                .set_color(style::color::AbsoluteColor::WHITE);
+            for changed in [shifted, middle, color] {
+                assert_eq!(
+                    compute_layout_damage(&initial, &changed),
+                    RestyleDamage::RELAYOUT,
+                    "{display:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_inline_and_live_caption_sizes_do_not_reconstruct() {
+        use style::values::computed::{Display, Size};
+        for display in [Display::Inline, Display::TableCaption] {
+            let mut initial = initial_style();
+            initial.mutate_box().set_display(display);
+            let mut height = initial.clone();
+            height
+                .mutate_position()
+                .set_height(Size::LengthPercentage(NonNegative(
+                    LengthPercentage::new_length(Length::new(40.0)),
+                )));
+            assert_eq!(
+                compute_layout_damage(&initial, &height),
+                RestyleDamage::RELAYOUT
+            );
+        }
     }
 
     #[test]
