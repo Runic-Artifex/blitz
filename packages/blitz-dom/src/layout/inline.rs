@@ -1051,6 +1051,19 @@ impl BaseDocument {
             .flatten()
             .map(line_baseline);
 
+        // A short authored line-height can leave font content below the line
+        // box. That content contributes to the CSS scroll extent independently
+        // of the block's height and of clipping (including overflow:clip).
+        let font_content_bottom = if inline_layout.text.is_empty() {
+            0.0
+        } else {
+            inline_layout
+                .layout
+                .lines()
+                .map(|line| line.metrics().content_block_max_coord / scale)
+                .fold(0.0_f32, f32::max)
+        };
+
         // Put layout back
         self.nodes[node_id]
             .data
@@ -1070,7 +1083,7 @@ impl BaseDocument {
             scrollable_overflow_rect: {
                 let content_extent = taffy::Size {
                     width: content_width,
-                    height: measured_size.height,
+                    height: measured_size.height.max(font_content_bottom),
                 } + padding.sum_axes();
                 taffy::Rect {
                     left: 0.0,
