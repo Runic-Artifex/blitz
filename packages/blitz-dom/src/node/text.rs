@@ -26,6 +26,7 @@ impl TextBrush {
 #[derive(Clone, Default)]
 pub struct TextLayout {
     pub text: String,
+    pub(crate) sources: Vec<parley::TextSourceRange>,
     pub content_widths: Option<ContentWidths>,
     pub layout: parley::layout::Layout<TextBrush>,
 }
@@ -33,6 +34,18 @@ pub struct TextLayout {
 impl TextLayout {
     pub fn new() -> Self {
         Default::default()
+    }
+
+    /// The DOM source of a normalized byte, without introducing shaping seams.
+    pub(crate) fn text_source(&self, byte: usize) -> Option<NodeId> {
+        let index = self
+            .sources
+            .partition_point(|source| source.range.end <= byte);
+        let source = self.sources.get(index)?;
+        source
+            .range
+            .contains(&byte)
+            .then(|| NodeId::from_u64(source.source))
     }
 
     /// The style span of an element flattened into this inline context.

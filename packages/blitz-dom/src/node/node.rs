@@ -1647,96 +1647,13 @@ impl Node {
             );
             let element_data = &self.element_data().unwrap();
             if let Some(ild) = element_data.inline_layout_data.as_ref() {
-                let layout = &ild.layout;
-                let scale = layout.scale();
-
-                // Caret lookup selects a line box. Pointer targets instead
-                // use positioned font-content fragments: short line heights
-                // and a terminal synthetic empty line must not hide text.
-                // Later painted runs win where content areas overlap.
-                let mut text_hit = None;
-                for line in layout.lines() {
-                    for item in line.items() {
-                        let parley::PositionedLayoutItem::GlyphRun(run) = item else {
-                            continue;
-                        };
-                        let mut node_id = run.style().brush.id;
-                        let owner = self.with(node_id);
-                        let owner_ineligible = owner.primary_styles().is_some_and(|style| {
-                            style.clone_pointer_events() == PointerEvents::None
-                                || matches!(
-                                    style.clone_visibility(),
-                                    Visibility::Hidden | Visibility::Collapse
-                                )
-                        });
-                        let Some((start, end)) =
-                            ild.run_inline_bounds(line, &run, self.with(node_id))
-                        else {
-                            continue;
-                        };
-                        // Text fragments use their style's primary font, with
-                        // neither leading nor the span's padding/border insets.
-                        let text_contains = !owner_ineligible
-                            && ild
-                                .style_index(node_id)
-                                .and_then(|index| line.style_content_bounds(index))
-                                .is_some_and(|(top, bottom)| {
-                                    text_location.intersects_snapped_rect(KurboRect::new(
-                                        start as f64 / scale as f64,
-                                        top as f64 / scale as f64,
-                                        end as f64 / scale as f64,
-                                        bottom as f64 / scale as f64,
-                                    ))
-                                });
-                        loop {
-                            // The formatting root has its own block box. It is
-                            // not a culled inline ancestor of a hidden/inert run.
-                            if node_id == self.id && node_id != run.style().brush.id {
-                                break;
-                            }
-                            let target = self.with(node_id);
-                            let bounds = ild.span_block_bounds(line, target, self);
-                            let contains = bounds.is_some_and(|(top, bottom)| {
-                                let rect = KurboRect::new(
-                                    start as f64 / scale as f64,
-                                    top as f64 / scale as f64,
-                                    end as f64 / scale as f64,
-                                    bottom as f64 / scale as f64,
-                                );
-                                text_location.intersects_rect(rect)
-                                    || (node_id == run.style().brush.id && text_contains)
-                            });
-                            let pointer_events_none =
-                                target.primary_styles().is_some_and(|style| {
-                                    style.clone_pointer_events() == PointerEvents::None
-                                });
-                            let hidden = target.primary_styles().is_some_and(|style| {
-                                matches!(
-                                    style.clone_visibility(),
-                                    Visibility::Hidden | Visibility::Collapse
-                                )
-                            });
-                            if contains && !pointer_events_none && !hidden {
-                                text_hit = Some(HitResult {
-                                    node_id,
-                                    x,
-                                    y,
-                                    is_text: true,
-                                });
-                                break;
-                            }
-                            if node_id == self.id {
-                                break;
-                            }
-                            let Some(parent) = target.parent else {
-                                break;
-                            };
-                            node_id = parent;
-                        }
-                    }
-                }
-                if text_hit.is_some() {
-                    return text_hit;
+                if let Some(node_id) = ild.hit_inline(self, text_location) {
+                    return Some(HitResult {
+                        node_id,
+                        x,
+                        y,
+                        is_text: true,
+                    });
                 }
             }
         }

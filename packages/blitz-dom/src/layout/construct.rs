@@ -1251,7 +1251,9 @@ pub(crate) fn build_inline_layout_into(
         build_inline_layout_recursive(&mut builder, nodes, after_id, text_transform);
     }
 
-    text_layout.text = builder.build_into(&mut text_layout.layout);
+    (text_layout.text, text_layout.sources) =
+        builder.build_into_with_sources(&mut text_layout.layout);
+    text_layout.content_widths = None;
     return;
 
     fn build_inline_layout_recursive(
@@ -1430,13 +1432,15 @@ pub(crate) fn build_inline_layout_into(
                 // TODO: optimize case transforms to be non-allocating
                 match parent_text_transform {
                     TextTransform::UPPERCASE => {
-                        builder.push_text(&data.content.to_uppercase());
+                        builder
+                            .push_text_with_source(&data.content.to_uppercase(), node_id.as_u64());
                     }
                     TextTransform::LOWERCASE => {
-                        builder.push_text(&data.content.to_lowercase());
+                        builder
+                            .push_text_with_source(&data.content.to_lowercase(), node_id.as_u64());
                     }
                     _ => {
-                        builder.push_text(&data.content);
+                        builder.push_text_with_source(&data.content, node_id.as_u64());
                     }
                 }
             }

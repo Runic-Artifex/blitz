@@ -108,6 +108,18 @@ impl HitLocation {
         self.intersects_rect(self.snapped_rect(rect))
     }
 
+    /// Paint ink expands outward to whole CSS pixels in the paint layer.
+    /// This is only a conservative traversal bound, never a pointer target.
+    pub(crate) fn intersects_expanded_ink_rect(self, rect: Rect) -> bool {
+        let offset = self.paint_offset;
+        self.intersects_rect(Rect::new(
+            (rect.x0 + offset.x).floor() - offset.x,
+            (rect.y0 + offset.y).floor() - offset.y,
+            (rect.x1 + offset.x).ceil() - offset.x,
+            (rect.y1 + offset.y).ceil() - offset.y,
+        ))
+    }
+
     pub(crate) fn snapped_rect(self, rect: Rect) -> Rect {
         let offset = self.paint_offset;
         // LayoutUnit::Round uses positive-infinity half ties, including -0.5.
