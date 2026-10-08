@@ -1051,8 +1051,7 @@ fn text_input_baseline(
             .border()
             .resolve_or_zero(parent_width, resolve_calc_value);
     let content_height = size.height - pb.vertical_axis_sum();
-    let editor_height = input.editor.try_layout()?.height() / scale;
-    let offset = ((content_height - editor_height) / 2.0).max(0.0);
+    let offset = input.vertical_centering_offset(content_height, scale);
     Some(pb.top + offset + line.metrics().baseline / scale)
 }
 

@@ -99,6 +99,17 @@ impl TextInputData {
         }
     }
 
+    /// Signed single-line editor offset in the content box, in CSS pixels.
+    /// A short control centers an overflowing editor above its padding edge.
+    pub(crate) fn vertical_centering_offset(&self, content_height: f32, scale: f32) -> f32 {
+        if self.is_multiline {
+            return 0.0;
+        }
+        self.editor.try_layout().map_or(0.0, |layout| {
+            (content_height - layout.height() / scale) / 2.0
+        })
+    }
+
     /// Whether the placeholder should be painted in place of the value.
     pub fn shows_placeholder(&self) -> bool {
         self.placeholder.is_some() && self.editor.text().chars().next().is_none()

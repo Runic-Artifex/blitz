@@ -14,6 +14,7 @@ use style::{
     shared_lock::StylesheetGuards,
     values::{
         computed::{Content, ContentItem, Display, Float, TextTransform},
+        generics::length::GenericSize,
         specified::box_::{DisplayInside, DisplayOutside},
     },
 };
@@ -912,13 +913,45 @@ fn placeholder_style(
     ))
 }
 
+/// Match the single-line inner editor's font-size and logical-height thresholds
+/// without changing the outer computed style or textarea layout.
+fn single_line_editor_line_height(
+    style: &style::properties::ComputedValues,
+    text_style: &parley::TextStyle<'_, '_, TextBrush>,
+) -> parley::LineHeight {
+    let computed_line_height = match text_style.line_height {
+        parley::LineHeight::MetricsRelative(_) => return text_style.line_height,
+        parley::LineHeight::FontSizeRelative(value) => (text_style.font_size * value).floor(),
+        parley::LineHeight::Absolute(value) => value.floor(),
+    };
+    if text_style.font_size >= computed_line_height {
+        return parley::LineHeight::NORMAL;
+    }
+    if let GenericSize::LengthPercentage(height) = style.content_block_size() {
+        if height.0.has_percentage()
+            || height
+                .0
+                .to_length()
+                .is_some_and(|height| height.px() > computed_line_height)
+        {
+            return parley::LineHeight::NORMAL;
+        }
+    }
+    text_style.line_height
+}
+
 fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multiline: bool) {
     let node = &doc.nodes[input_element_id];
-    let parley_style = node
+    let mut parley_style = node
         .primary_styles()
         .as_ref()
         .map(|s| stylo_to_parley::style(node.id, s, None))
         .unwrap_or_default();
+    if !is_multiline {
+        if let Some(style) = node.primary_styles() {
+            parley_style.line_height = single_line_editor_line_height(&style, &parley_style);
+        }
+    }
     let alignment = node
         .primary_styles()
         .map(|s| stylo_to_parley::text_align(s.clone_text_align()))
@@ -949,8 +982,11 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
         .and_then(|_| placeholder_style(doc, input_element_id));
 
     let placeholder = placeholder_text.map(|text| {
-        let (style, color) =
+        let (mut style, color) =
             resolved_placeholder_style.unwrap_or_else(|| (parley_style.clone(), inherited_color));
+        if !is_multiline {
+            style.line_height = parley_style.line_height;
+        }
 
         let mut font_ctx = doc.font_ctx.lock().unwrap();
         let mut builder =

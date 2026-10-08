@@ -863,13 +863,9 @@ impl Node {
             .downcast_element()
             .and_then(|el| el.text_input_data())
         {
-            if !input_data.is_multiline {
-                let content_box_height = self.final_layout().content_box_height();
-                let input_height = input_data.editor.try_layout().unwrap().height() / scale as f32;
-                let y_offset = ((content_box_height - input_height) / 2.0).max(0.0);
-
-                return y_offset as f64;
-            }
+            return input_data
+                .vertical_centering_offset(self.final_layout().content_box_height(), scale as f32)
+                as f64;
         }
 
         0.0
