@@ -333,6 +333,7 @@ pub(crate) fn compute_layout_damage(old: &ComputedValues, new: &ComputedValues) 
         let new_text = new.get_inherited_text();
         if !std::ptr::eq(old_text, new_text)
             && (old_text.white_space_collapse != new_text.white_space_collapse
+                || old_text.text_wrap_mode != new_text.text_wrap_mode
                 || old_text.text_transform != new_text.text_transform
                 || old_text.word_break != new_text.word_break
                 || old_text.line_break != new_text.line_break
@@ -384,6 +385,135 @@ pub(crate) fn sort_layout_children_by_order(
         return;
     }
     layout_children.sort_by_cached_key(|id| nodes[*id].order());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use style::computed_values::{
+        direction::T as Direction, white_space_collapse::T as WhiteSpaceCollapse,
+    };
+    use style::properties::style_structs::Font;
+    use style::values::computed::font::{FontWeight, LineHeight};
+    use style::values::computed::{
+        AlignmentBaseline, BaselineShift, Length, LengthPercentage, Percentage,
+    };
+    use style::values::generics::NonNegative;
+    use style::values::generics::box_::BaselineShiftKeyword;
+
+    fn initial_style() -> ComputedValues {
+        (*ComputedValues::initial_values_with_font_override(Font::initial_values())).clone()
+    }
+
+    fn with_shift(initial: &ComputedValues, shift: BaselineShift) -> ComputedValues {
+        let mut style = initial.clone();
+        style.mutate_box().set_baseline_shift(shift);
+        style
+    }
+
+    #[test]
+    fn zero_category_restyles_keep_the_cached_shaping() {
+        let initial = initial_style();
+        let styles = [
+            initial.clone(),
+            with_shift(&initial, BaselineShift::zero()),
+            with_shift(
+                &initial,
+                BaselineShift::Length(LengthPercentage::new_percent(Percentage(0.0))),
+            ),
+        ];
+        for old in &styles {
+            for new in &styles {
+                assert_eq!(compute_layout_damage(old, new), RestyleDamage::RELAYOUT);
+            }
+        }
+    }
+
+    #[test]
+    fn vertical_alignment_restyles_keep_cached_shaping() {
+        let initial = initial_style();
+        let explicit_zero = with_shift(&initial, BaselineShift::zero());
+        let changed = [
+            with_shift(
+                &initial,
+                BaselineShift::Length(LengthPercentage::new_length(Length::new(1.0))),
+            ),
+            with_shift(
+                &initial,
+                BaselineShift::Length(LengthPercentage::new_length(Length::new(-1.0))),
+            ),
+            with_shift(
+                &initial,
+                BaselineShift::Length(LengthPercentage::new_percent(Percentage(0.1))),
+            ),
+            with_shift(&initial, BaselineShift::Keyword(BaselineShiftKeyword::Sub)),
+            with_shift(
+                &initial,
+                BaselineShift::Keyword(BaselineShiftKeyword::Super),
+            ),
+        ];
+        for zero in [&initial, &explicit_zero] {
+            for other in &changed {
+                assert_eq!(compute_layout_damage(zero, other), RestyleDamage::RELAYOUT);
+                assert_eq!(compute_layout_damage(other, zero), RestyleDamage::RELAYOUT);
+            }
+        }
+        for old in &changed {
+            for new in &changed {
+                if old.clone_baseline_shift() != new.clone_baseline_shift() {
+                    assert_eq!(compute_layout_damage(old, new), RestyleDamage::RELAYOUT);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn alignment_changes_keep_cached_shaping() {
+        let baseline = initial_style();
+        for shift in [BaselineShift::implicit_zero(), BaselineShift::zero()] {
+            let mut middle = with_shift(&baseline, shift);
+            middle
+                .mutate_box()
+                .set_alignment_baseline(AlignmentBaseline::Middle);
+            assert_eq!(
+                compute_layout_damage(&baseline, &middle),
+                RestyleDamage::RELAYOUT
+            );
+            assert_eq!(
+                compute_layout_damage(&middle, &baseline),
+                RestyleDamage::RELAYOUT
+            );
+        }
+    }
+
+    #[test]
+    fn structural_and_text_changes_still_recollect() {
+        let initial = initial_style();
+        let mut block = initial.clone();
+        block
+            .mutate_box()
+            .set_display(style::values::computed::Display::Block);
+        let mut weight = initial.clone();
+        weight
+            .mutate_font()
+            .set_font_weight(FontWeight::from_float(700.0));
+        let mut line_height = initial.clone();
+        line_height
+            .mutate_font()
+            .set_line_height(LineHeight::Number(NonNegative(2.0)));
+        let mut direction = initial.clone();
+        direction
+            .mutate_inherited_box()
+            .set_direction(Direction::Rtl);
+        let mut whitespace = initial.clone();
+        whitespace
+            .mutate_inherited_text()
+            .set_white_space_collapse(WhiteSpaceCollapse::Preserve);
+        for changed in [block, weight, line_height, direction, whitespace] {
+            assert_eq!(compute_layout_damage(&initial, &changed), ALL_DAMAGE);
+            assert_eq!(compute_layout_damage(&changed, &initial), ALL_DAMAGE);
+        }
+    }
 }
 
 impl BaseDocument {

@@ -1168,7 +1168,7 @@ pub(crate) fn find_inline_layout_embedded_boxes(
 }
 
 /// The used font size of a node's parent (for `vertical-align: sub` and `super`).
-fn parent_font_size(nodes: &crate::NodeTree, node: &crate::Node) -> Option<f32> {
+pub(super) fn parent_font_size(nodes: &crate::NodeTree, node: &crate::Node) -> Option<f32> {
     let parent = nodes.get(node.parent?)?;
     parent
         .primary_styles()
@@ -1365,6 +1365,11 @@ pub(crate) fn build_inline_layout_into(
                             builder.pop_style_span();
                         } else {
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
+                            let shaping_boundary = nodes.quirks_mode()
+                                == crate::QuirksMode::NoQuirks
+                                && style.is_some_and(|s| {
+                                    stylo_to_parley::inline_span_needs_shaping_boundaries(s)
+                                });
                             let style = node
                                 .primary_styles()
                                 .map(|s| {
@@ -1379,7 +1384,11 @@ pub(crate) fn build_inline_layout_into(
                                     ..Default::default()
                                 });
 
-                            builder.push_style_span(style);
+                            builder.push_style_span_with_shaping_boundaries(
+                                style,
+                                shaping_boundary,
+                                shaping_boundary,
+                            );
 
                             if let Some(before_id) = node.before() {
                                 build_inline_layout_recursive(

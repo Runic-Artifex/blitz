@@ -211,6 +211,24 @@ impl BaseDocument {
         let retained_layout =
             (inputs.run_mode == RunMode::ComputeSize).then(|| inline_layout.clone());
 
+        // Vertical alignment changes line geometry without invalidating cached
+        // shaping. Boundary intent is applied only when the paragraph is rebuilt.
+        let alignments: Vec<_> = inline_layout
+            .layout
+            .styles()
+            .iter()
+            .map(|style| {
+                let owner = self.nodes.get(style.brush.id)?;
+                let computed = owner.primary_styles()?;
+                Some(stylo_to_parley::inline_box_vertical_align(
+                    &computed,
+                    super::construct::parent_font_size(&self.nodes, owner),
+                    scale,
+                ))
+            })
+            .collect();
+        assert!(inline_layout.layout.update_vertical_alignments(&alignments));
+
         let style = self.nodes[node_id].layout_style();
 
         // Note: both horizontal and vertical percentage padding/borders are resolved against the container's inline size (i.e. width).
@@ -359,6 +377,14 @@ impl BaseDocument {
 
         // Update inline boxes
         for ibox in inline_layout.layout.inline_boxes_mut() {
+            let owner = &self.nodes[NodeId::from_u64(ibox.id)];
+            if let Some(computed) = owner.primary_styles() {
+                ibox.vertical_align = stylo_to_parley::inline_box_vertical_align(
+                    &computed,
+                    super::construct::parent_font_size(&self.nodes, owner),
+                    scale,
+                );
+            }
             let is_button = self.nodes[NodeId::from_u64(ibox.id)].is_button();
             let style = self.nodes[NodeId::from_u64(ibox.id)].layout_style();
             let margin = style

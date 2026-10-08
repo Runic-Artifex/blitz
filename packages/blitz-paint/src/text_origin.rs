@@ -110,7 +110,7 @@ impl TextOrigins {
             let computed = node.primary_styles()?;
             let box_style = computed.get_box();
             let aligned = box_style.clone_alignment_baseline() != AlignmentBaseline::Baseline
-                || !matches!(box_style.clone_baseline_shift(), BaselineShift::Length(value) if value.is_zero());
+                || !geometric_baseline_shift_is_zero(box_style.clone_baseline_shift());
             if has_margin(node)
                 || aligned
                 || line.style_font_metrics(index) != line.style_font_metrics(parent)
@@ -140,6 +140,14 @@ impl TextOrigins {
         }
         let anchor = top / scale;
         paint_shift(self.origin_y, self.paint_y, anchor, scale)
+    }
+}
+
+fn geometric_baseline_shift_is_zero(shift: BaselineShift) -> bool {
+    match shift {
+        BaselineShift::ImplicitZero => true,
+        BaselineShift::Length(value) => value.is_zero(),
+        BaselineShift::Keyword(_) => false,
     }
 }
 
@@ -219,7 +227,28 @@ fn initially_materialized(node: &Node) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::paint_shift;
+    use super::{geometric_baseline_shift_is_zero, paint_shift};
+    use style::values::computed::{BaselineShift, Length, LengthPercentage, Percentage};
+    use style::values::generics::box_::BaselineShiftKeyword;
+
+    #[test]
+    fn implicit_and_explicit_zero_preserve_the_same_paint_anchor() {
+        assert!(geometric_baseline_shift_is_zero(
+            BaselineShift::implicit_zero()
+        ));
+        assert!(geometric_baseline_shift_is_zero(BaselineShift::zero()));
+        assert!(geometric_baseline_shift_is_zero(BaselineShift::Length(
+            LengthPercentage::new_percent(Percentage(0.0)),
+        )));
+        for value in [-1.0, 1.0] {
+            assert!(!geometric_baseline_shift_is_zero(BaselineShift::Length(
+                LengthPercentage::new_length(Length::new(value)),
+            )));
+        }
+        assert!(!geometric_baseline_shift_is_zero(BaselineShift::Keyword(
+            BaselineShiftKeyword::Sub,
+        )));
+    }
 
     #[test]
     fn materialized_parent_phase_precedes_device_hinting() {

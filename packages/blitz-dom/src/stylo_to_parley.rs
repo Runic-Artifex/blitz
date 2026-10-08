@@ -345,6 +345,16 @@ pub(crate) fn white_space_collapse(input: stylo::WhiteSpaceCollapse) -> parley::
     }
 }
 
+/// Ordinary inline boxes with explicit vertical alignment request shaping boundaries,
+/// even when their geometric shift is zero. The caller gates this to standards mode.
+pub(crate) fn inline_span_needs_shaping_boundaries(style: &stylo::ComputedValues) -> bool {
+    style.clone_alignment_baseline() != stylo::AlignmentBaseline::Baseline
+        || !matches!(
+            style.clone_baseline_shift(),
+            stylo::BaselineShift::ImplicitZero
+        )
+}
+
 /// Map the css-inline-3 `alignment-baseline` and `baseline-shift` longhands (which Stylo
 /// stores in place of the `vertical-align` shorthand) to Parley's `VerticalAlign`.
 ///
@@ -366,6 +376,7 @@ pub(crate) fn vertical_align(
         stylo::AlignmentBaseline::Middle => parley::AlignmentBaseline::Middle,
     };
     let shift = match box_styles.clone_baseline_shift() {
+        stylo::BaselineShift::ImplicitZero => parley::BaselineShift::Length(0.0),
         stylo::BaselineShift::Keyword(stylo::BaselineShiftKeyword::Sub) => match parent_font_size {
             Some(size) => parley::BaselineShift::Length(-(size / 5.0 + 1.0)),
             None => parley::BaselineShift::Sub,
@@ -551,7 +562,44 @@ pub(crate) fn style(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use style::values::computed::{LengthPercentage, Percentage};
     use style::values::generics::font::{FeatureTagValue, FontSettings, FontTag};
+
+    #[test]
+    fn explicit_zero_changes_boundary_intent_without_changing_geometry() {
+        let initial =
+            stylo::ComputedValues::initial_values_with_font_override(stylo::Font::initial_values());
+        let mut style = (*initial).clone();
+        assert!(!inline_span_needs_shaping_boundaries(&style));
+        assert_eq!(
+            vertical_align(&style, None),
+            parley::VerticalAlign::BASELINE
+        );
+        for shift in [
+            stylo::BaselineShift::zero(),
+            stylo::BaselineShift::Length(LengthPercentage::new_percent(Percentage(0.0))),
+        ] {
+            style.mutate_box().set_baseline_shift(shift);
+            assert!(inline_span_needs_shaping_boundaries(&style));
+            assert_eq!(
+                vertical_align(&style, None),
+                parley::VerticalAlign::BASELINE
+            );
+            assert_eq!(
+                inline_box_vertical_align(&style, None, 1.25),
+                parley::VerticalAlign::BASELINE,
+            );
+        }
+        style
+            .mutate_box()
+            .set_baseline_shift(stylo::BaselineShift::implicit_zero());
+        assert!(!inline_span_needs_shaping_boundaries(&style));
+        style
+            .mutate_box()
+            .set_alignment_baseline(stylo::AlignmentBaseline::Middle);
+        assert!(inline_span_needs_shaping_boundaries(&style));
+        assert_eq!(vertical_align(&style, None), parley::VerticalAlign::MIDDLE);
+    }
 
     /// Collect the (tag, value) pairs from a feature list for easy assertions.
     fn pairs(features: &[parley::FontFeature]) -> Vec<([u8; 4], u16)> {

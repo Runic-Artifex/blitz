@@ -273,7 +273,12 @@ impl DocumentMutator<'_> {
             let node = &mut self.doc.nodes[node_id];
             if let Some(mut data) = node.try_stylo_element_data_mut().and_then(|s| s.get_mut()) {
                 data.hint |= RestyleHint::restyle_subtree();
-                data.damage.insert(ALL_DAMAGE);
+                // Style attributes use the computed-style diff, like the
+                // individual style-property APIs. Other attributes can change
+                // element behavior independently of computed styles.
+                if name.local != local_name!("style") {
+                    data.damage.insert(ALL_DAMAGE);
+                }
             }
             node.mark_damaged();
 
@@ -402,7 +407,9 @@ impl DocumentMutator<'_> {
 
             if let Some(mut data) = node.try_stylo_element_data_mut().and_then(|s| s.get_mut()) {
                 data.hint |= RestyleHint::restyle_subtree();
-                data.damage.insert(ALL_DAMAGE);
+                if name.local != local_name!("style") {
+                    data.damage.insert(ALL_DAMAGE);
+                }
             }
             node.mark_damaged();
 
@@ -1348,6 +1355,261 @@ mod test {
     use blitz_traits::shell::{ColorScheme, ShellProvider, Viewport};
 
     use crate::{Attribute, BaseDocument, DocumentConfig, ElementData, NodeData, qual_name};
+
+    fn alignment_document(
+        scale: f32,
+    ) -> (BaseDocument, crate::NodeId, crate::NodeId, crate::NodeId) {
+        let mut document = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(500, 250, scale, ColorScheme::Light)),
+            ..Default::default()
+        });
+        document.set_quirks_mode(crate::QuirksMode::NoQuirks);
+        // Use the crate's font and a supported glyph, so this test also works
+        // without system fonts and exercises real, nonzero metrics.
+        document.load_resource(crate::net::ResourceLoadResponse {
+            request_id: 0,
+            node_id: None,
+            resolved_url: Some("test://alignment-font".into()),
+            result: Ok(crate::net::Resource::Font(
+                blitz_traits::net::Bytes::from_static(crate::BULLET_FONT),
+                crate::net::FontFaceOverrides {
+                    family_name: Some("AlignmentTest".into()),
+                    ..Default::default()
+                },
+            )),
+        });
+        document.add_user_agent_stylesheet("html,body,div{display:block}");
+        let root = document.root_node().id;
+        let mut mutator = document.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![]);
+        let body = mutator.create_element(qual_name!("body"), vec![]);
+        let paragraph = mutator.create_element(
+            qual_name!("div"),
+            vec![Attribute {
+                name: qual_name!("style"),
+                value: "width:300px;font-family:AlignmentTest;font-size:20px;line-height:1.2"
+                    .into(),
+            }],
+        );
+        let span = mutator.create_element(qual_name!("span"), vec![]);
+        let before = mutator.create_text_node("•");
+        let inner = mutator.create_text_node("•");
+        let after = mutator.create_text_node("•");
+        mutator.append_children(span, &[inner]);
+        mutator.append_children(paragraph, &[before, span, after]);
+        mutator.append_children(body, &[paragraph]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root, &[html]);
+        drop(mutator);
+        document.resolve(0.0);
+        (document, paragraph, span, inner)
+    }
+
+    fn glyph_signature(
+        document: &BaseDocument,
+        paragraph: crate::NodeId,
+    ) -> Vec<(usize, usize, u32, u32)> {
+        let inline = &document.nodes[paragraph]
+            .element_data()
+            .unwrap()
+            .inline_layout_data
+            .as_ref()
+            .unwrap()
+            .layout;
+        let mut signature = Vec::new();
+        for line in inline.lines() {
+            for item in line.items() {
+                if let parley::PositionedLayoutItem::GlyphRun(run) = item {
+                    let range = run.run().text_range();
+                    signature.extend(
+                        run.glyphs().map(|glyph| {
+                            (range.start, range.end, glyph.id, glyph.advance.to_bits())
+                        }),
+                    );
+                }
+            }
+        }
+        assert!(!signature.is_empty(), "the test requires real glyphs");
+        signature
+    }
+
+    fn relative_baseline(
+        document: &BaseDocument,
+        paragraph: crate::NodeId,
+        span: crate::NodeId,
+    ) -> f32 {
+        let inline = &document.nodes[paragraph]
+            .element_data()
+            .unwrap()
+            .inline_layout_data
+            .as_ref()
+            .unwrap()
+            .layout;
+        let mut parent = None;
+        let mut child = None;
+        for item in inline.lines().next().unwrap().items() {
+            if let parley::PositionedLayoutItem::GlyphRun(run) = item {
+                if run.style().brush.id == paragraph {
+                    parent = Some(run.baseline());
+                }
+                if run.style().brush.id == span {
+                    child = Some(run.baseline());
+                }
+            }
+        }
+        child.unwrap() - parent.unwrap()
+    }
+
+    #[test]
+    fn style_attribute_alignment_refreshes_geometry_without_reshaping() {
+        for scale in [1.0, 1.25] {
+            let (mut document, paragraph, span, _) = alignment_document(scale);
+            let signature = glyph_signature(&document, paragraph);
+            assert_eq!(relative_baseline(&document, paragraph, span), 0.0);
+            for (style, shift) in [
+                ("vertical-align:3px", -3.0),
+                ("vertical-align:-2px", 2.0),
+                ("vertical-align:0px", 0.0),
+            ] {
+                document
+                    .mutate()
+                    .set_attribute(span, qual_name!("style"), style);
+                document.resolve(0.0);
+                assert_eq!(glyph_signature(&document, paragraph), signature);
+                assert!(
+                    (relative_baseline(&document, paragraph, span) - shift * scale).abs() < 0.00001
+                );
+            }
+            document.mutate().clear_attribute(span, qual_name!("style"));
+            document.resolve(0.0);
+            assert_eq!(glyph_signature(&document, paragraph), signature);
+            assert_eq!(relative_baseline(&document, paragraph, span), 0.0);
+        }
+    }
+
+    #[test]
+    fn font_and_text_mutations_still_reshape_the_paragraph() {
+        let (mut document, paragraph, span, inner) = alignment_document(1.0);
+        let initial = glyph_signature(&document, paragraph);
+        document
+            .mutate()
+            .set_attribute(span, qual_name!("style"), "font-size:28px");
+        document.resolve(0.0);
+        let changed_font = glyph_signature(&document, paragraph);
+        assert_ne!(changed_font, initial);
+        document.mutate().set_node_text(inner, "••");
+        document.resolve(0.0);
+        assert_ne!(glyph_signature(&document, paragraph), changed_font);
+    }
+
+    #[test]
+    fn style_attribute_white_space_restyles_update_wrapping() {
+        let (mut document, paragraph, _, inner) = alignment_document(1.0);
+        document
+            .mutate()
+            .set_node_text(inner, "• • • • • • • • • • • •");
+        let lines = |document: &BaseDocument| {
+            document.nodes[paragraph]
+                .element_data()
+                .unwrap()
+                .inline_layout_data
+                .as_ref()
+                .unwrap()
+                .layout
+                .lines()
+                .count()
+        };
+        let style = |white_space: &str| {
+            format!(
+                "width:32px;font-family:AlignmentTest;font-size:20px;line-height:1.2;white-space:{white_space}"
+            )
+        };
+        document
+            .mutate()
+            .set_attribute(paragraph, qual_name!("style"), &style("normal"));
+        document.resolve(0.0);
+        let wrapped = lines(&document);
+        assert!(wrapped > 1, "normal must wrap the spaced glyphs");
+
+        document
+            .mutate()
+            .set_attribute(paragraph, qual_name!("style"), &style("nowrap"));
+        document.resolve(0.0);
+        assert_eq!(lines(&document), 1, "nowrap must suppress wrapping");
+
+        document
+            .mutate()
+            .set_attribute(paragraph, qual_name!("style"), &style("normal"));
+        document.resolve(0.0);
+        assert_eq!(lines(&document), wrapped, "normal must restore wrapping");
+    }
+
+    #[test]
+    fn atomic_alignment_restyles_refresh_scaled_geometry() {
+        let scale = 1.25;
+        let (mut document, paragraph, _, _) = alignment_document(scale);
+        let mut mutator = document.mutate();
+        let atomic = mutator.create_element(
+            qual_name!("span"),
+            vec![Attribute {
+                name: qual_name!("style"),
+                value: "display:inline-block;width:12px;height:10px".into(),
+            }],
+        );
+        mutator.append_children(paragraph, &[atomic]);
+        drop(mutator);
+        document.resolve(0.0);
+        let relative_top = |document: &BaseDocument| {
+            let inline = &document.nodes[paragraph]
+                .element_data()
+                .unwrap()
+                .inline_layout_data
+                .as_ref()
+                .unwrap()
+                .layout;
+            let line = inline.lines().next().unwrap();
+            let mut baseline = None;
+            let mut top = None;
+            for item in line.items() {
+                match item {
+                    parley::PositionedLayoutItem::GlyphRun(run)
+                        if run.style().brush.id == paragraph =>
+                    {
+                        baseline = Some(run.baseline())
+                    }
+                    parley::PositionedLayoutItem::InlineBox(ibox) if ibox.id == atomic.as_u64() => {
+                        top = Some(ibox.y)
+                    }
+                    _ => {}
+                }
+            }
+            top.unwrap() - baseline.unwrap()
+        };
+        let before = relative_top(&document);
+        document.mutate().set_attribute(
+            atomic,
+            qual_name!("style"),
+            "display:inline-block;width:12px;height:10px;vertical-align:3px",
+        );
+        document.resolve(0.0);
+        assert!((relative_top(&document) - before + 3.0 * scale).abs() < 0.00001);
+        let inline = &document.nodes[paragraph]
+            .element_data()
+            .unwrap()
+            .inline_layout_data
+            .as_ref()
+            .unwrap()
+            .layout;
+        let alignment = inline
+            .inline_boxes()
+            .find(|ibox| ibox.id == atomic.as_u64())
+            .unwrap()
+            .vertical_align;
+        assert_eq!(
+            alignment.shift,
+            parley::style::BaselineShift::Length(3.0 * scale)
+        );
+    }
 
     #[test]
     fn media_type_defaults_to_screen() {
