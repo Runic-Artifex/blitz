@@ -209,6 +209,8 @@ struct DecorationRunGeometry {
     /// The baseline the decoration is positioned from (the run's own, `vertical-align`
     /// shifted, baseline).
     baseline: f32,
+    /// CSS anchor correction, separate from the run's logical baseline shift.
+    paint_offset: f32,
     ascent: f32,
     descent: f32,
     underline_offset: f32,
@@ -423,7 +425,7 @@ fn flush_line_decorations(
                 // decoration is positioned from the decorating box's own baseline. For the
                 // inline root that is the line's baseline.
                 if acc.node_id == inline_root_id {
-                    geom.baseline = line_baseline;
+                    geom.baseline = line_baseline + geom.paint_offset;
                 }
                 geom
             }
@@ -786,6 +788,7 @@ pub(crate) fn stroke_text<'a>(
                 // produce a single straight line rather than one stepped segment per run.
                 let geometry = DecorationRunGeometry {
                     baseline: glyph_run.baseline() + paint_offset,
+                    paint_offset,
                     ascent: metrics.ascent,
                     descent: metrics.descent,
                     underline_offset: metrics.underline_offset,
