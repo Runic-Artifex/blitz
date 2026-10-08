@@ -85,6 +85,57 @@ mod document_mode_tests {
     use super::*;
 
     #[test]
+    fn changing_line_width_policy_recascades_cached_styles() {
+        use crate::{Attribute, qual_name};
+        use style::device::servo::LineWidthRounding;
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(500, 250, 1.25, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![]);
+        let body = mutator.create_element(qual_name!("body"), vec![]);
+        let node = mutator.create_element(
+            qual_name!("div"),
+            vec![Attribute {
+                name: qual_name!("style"),
+                value: "width:30px;height:20px;border:.5px solid".into(),
+            }],
+        );
+        mutator.append_children(body, &[node]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root_id, &[html]);
+        drop(mutator);
+        for (policy, expected) in [
+            (LineWidthRounding::CssPixel, 1.0),
+            (LineWidthRounding::DevicePixel, 0.8),
+            (LineWidthRounding::CssPixel, 1.0),
+        ] {
+            let device = make_device(
+                &doc.viewport,
+                doc.media_type,
+                doc.quirks_mode,
+                doc.font_ctx.clone(),
+            )
+            .with_line_width_rounding(policy);
+            doc.set_stylist_device(device);
+            for _ in 0..4 {
+                doc.resolve(0.0);
+            }
+            let width = doc.nodes[node]
+                .primary_styles()
+                .unwrap()
+                .clone_border_left_width()
+                .0
+                .to_f32_px();
+            assert!((width - expected).abs() < 0.00001);
+            assert!((doc.nodes[node].final_layout().border.left - expected).abs() < 0.00001);
+            assert_eq!(doc.stylist.device().app_units_per_device_pixel(), 48);
+        }
+    }
+
+    #[test]
     fn document_mode_survives_device_rebuilds() {
         let mut doc = BaseDocument::new(DocumentConfig::default());
         for mode in [
