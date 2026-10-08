@@ -342,14 +342,8 @@ pub(crate) fn handle_pointermove<F: FnMut(DomEvent)>(
             x: final_layout.padding.left + final_layout.border.left,
             y: final_layout.padding.top + final_layout.border.top,
         };
-        if !text_input_data.is_multiline {
-            let layout = text_input_data.editor.try_layout().unwrap();
-            let content_box_height = final_layout.content_box_height();
-            let input_height = layout.height() / layout.scale();
-            let y_offset = ((content_box_height - input_height) / 2.0).max(0.0);
-
-            content_box_offset.y += y_offset;
-        }
+        content_box_offset.y += text_input_data
+            .vertical_centering_offset(final_layout.content_box_height(), doc.viewport.scale());
 
         // Account for the input's scroll offset (stored in CSS pixels, scaled here to device
         // pixels) when mapping the pointer location into the text content's coordinate space.
@@ -363,10 +357,16 @@ pub(crate) fn handle_pointermove<F: FnMut(DomEvent)>(
         let x = (hit.x - content_box_offset.x) as f64 * doc.viewport.scale_f64() + scroll_x;
         let y = (hit.y - content_box_offset.y) as f64 * doc.viewport.scale_f64() + scroll_y;
 
-        text_input_data
+        let boundary = text_input_data.single_line_pointer_boundary(y as f32);
+        let mut font_ctx = doc.font_ctx.lock().unwrap();
+        let mut driver = text_input_data
             .editor
-            .driver(&mut doc.font_ctx.lock().unwrap(), &mut doc.layout_ctx)
-            .extend_selection_to_point(x as f32, y as f32);
+            .driver(&mut font_ctx, &mut doc.layout_ctx);
+        if let Some(index) = boundary {
+            driver.extend_selection_to_byte(index);
+        } else {
+            driver.extend_selection_to_point(x as f32, y as f32);
+        }
 
         changed = true;
     } else if event.is_mouse()
@@ -461,13 +461,10 @@ pub(crate) fn handle_pointerdown(
                         x: node.final_layout().padding.left + node.final_layout().border.left,
                         y: node.final_layout().padding.top + node.final_layout().border.top,
                     };
-                    if !text_input_data.is_multiline {
-                        let layout = text_input_data.editor.try_layout().unwrap();
-                        let content_box_height = node.final_layout().content_box_height();
-                        let input_height = layout.height() / layout.scale();
-                        let y_offset = ((content_box_height - input_height) / 2.0).max(0.0);
-                        content_box_offset.y += y_offset;
-                    }
+                    content_box_offset.y += text_input_data.vertical_centering_offset(
+                        node.final_layout().content_box_height(),
+                        doc.viewport.scale(),
+                    );
                     // `scroll_offset` is stored in CSS pixels; scale it to device pixels to
                     // match the editor's coordinate space.
                     let scroll_offset =
@@ -521,6 +518,7 @@ pub(crate) fn handle_pointerdown(
             let node = &mut doc.nodes[actual_target];
             let el = node.data.downcast_element_mut().unwrap();
             if let SpecialElementData::TextInput(ref mut text_input_data) = el.special_data {
+                let boundary = text_input_data.single_line_pointer_boundary(ty as f32);
                 let mut font_ctx = doc.font_ctx.lock().unwrap();
                 let mut driver = text_input_data
                     .editor
@@ -528,7 +526,13 @@ pub(crate) fn handle_pointerdown(
 
                 match click_count {
                     1 => {
-                        if mods.shift() {
+                        if let Some(index) = boundary {
+                            if mods.shift() {
+                                driver.extend_selection_to_byte(index);
+                            } else {
+                                driver.move_to_byte(index);
+                            }
+                        } else if mods.shift() {
                             driver.shift_click_extension(tx as f32, ty as f32);
                         } else {
                             driver.move_to_point(tx as f32, ty as f32);

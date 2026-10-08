@@ -110,6 +110,22 @@ impl TextInputData {
         })
     }
 
+    /// Single-line HTML controls map vertical space outside their editor to
+    /// logical text boundaries, even when the paragraph runs right-to-left.
+    pub(crate) fn single_line_pointer_boundary(&self, y: f32) -> Option<usize> {
+        if self.is_multiline {
+            return None;
+        }
+        let layout = self.editor.try_layout()?;
+        if y < 0.0 {
+            Some(0)
+        } else if y >= layout.height() {
+            Some(self.editor.raw_text().len())
+        } else {
+            None
+        }
+    }
+
     /// Whether the placeholder should be painted in place of the value.
     pub fn shows_placeholder(&self) -> bool {
         self.placeholder.is_some() && self.editor.text().chars().next().is_none()
