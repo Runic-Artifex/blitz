@@ -33,11 +33,8 @@ impl Node {
             size.height - inset.bottom,
         );
         let rect = kurbo::Rect::new(left as f64, top as f64, right as f64, bottom as f64);
-        if !location.intersects_rect(rect) {
-            return false;
-        }
         let Some(styles) = self.primary_styles() else {
-            return true;
+            return location.intersects_rect(rect);
         };
         // Native checkable widgets keep a rectangular clickable box even
         // when their painted checkbox/radio frame is smaller or circular.
@@ -46,7 +43,7 @@ impl Node {
             .flags
             .contains(stylo_taffy::StyleFlags::NATIVE_CHECKABLE_CONTROL)
         {
-            return true;
+            return location.intersects_rect(rect);
         }
         let border = styles.get_border();
         let resolve = |radius: &style::values::computed::BorderCornerRadius| {
@@ -65,35 +62,42 @@ impl Node {
                     .px(),
             )
         };
-        let mut radii = [
+        let radii = [
             resolve(&border.border_top_left_radius),
             resolve(&border.border_top_right_radius),
             resolve(&border.border_bottom_right_radius),
             resolve(&border.border_bottom_left_radius),
         ];
-        let factor = 1.0f32
-            .min(size.width / (radii[0].0 + radii[1].0))
-            .min(size.width / (radii[3].0 + radii[2].0))
-            .min(size.height / (radii[0].1 + radii[3].1))
-            .min(size.height / (radii[1].1 + radii[2].1));
-        for radius in &mut radii {
-            radius.0 *= factor;
-            radius.1 *= factor;
+        let rounded = radii.iter().any(|&(x, y)| x > 0.0 && y > 0.0);
+        if !rounded {
+            return location.intersects_rect(rect);
         }
+        // Resolve percentages from physical size, then constrain the outer
+        // radii against the snapped contour before deriving its padding clip.
+        let outer = location.snapped_rect(kurbo::Rect::new(
+            0.0,
+            0.0,
+            size.width as f64,
+            size.height as f64,
+        ));
+        let factor = 1.0f64
+            .min(outer.width() / f64::from(radii[0].0 + radii[1].0))
+            .min(outer.width() / f64::from(radii[3].0 + radii[2].0))
+            .min(outer.height() / f64::from(radii[0].1 + radii[3].1))
+            .min(outer.height() / f64::from(radii[1].1 + radii[2].1));
         let radii = std::array::from_fn(|i| {
             let (rx, ry) = radii[i];
             let on_left = i == 0 || i == 3;
             let on_top = i < 2;
-            let rx = (rx - if on_left { inset.left } else { inset.right }).max(0.0);
-            let ry = (ry - if on_top { inset.top } else { inset.bottom }).max(0.0);
-            (rx as f64, ry as f64)
+            let rx = (f64::from(rx) * factor
+                - f64::from(if on_left { inset.left } else { inset.right }))
+            .max(0.0);
+            let ry = (f64::from(ry) * factor
+                - f64::from(if on_top { inset.top } else { inset.bottom }))
+            .max(0.0);
+            (rx, ry)
         });
-        let rounded = radii.iter().any(|&(x, y)| x > 0.0 && y > 0.0);
-        let rect = if rounded {
-            location.snapped_rect(rect)
-        } else {
-            rect
-        };
+        let rect = location.snapped_rect(rect);
         location.intersects_rounded_rect(rect, radii)
     }
 

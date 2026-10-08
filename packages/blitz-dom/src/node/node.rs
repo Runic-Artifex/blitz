@@ -1675,6 +1675,11 @@ impl Node {
                         );
                         let text_contains = text_location.intersects_snapped_rect(font_rect);
                         loop {
+                            // The formatting root has its own block box. It is
+                            // not a culled inline ancestor of a hidden/inert run.
+                            if node_id == self.id && node_id != run.style().brush.id {
+                                break;
+                            }
                             let target = self.with(node_id);
                             let bounds = ild.span_block_bounds(line, target, self);
                             let contains = bounds.is_some_and(|(top, bottom)| {
