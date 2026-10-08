@@ -1635,28 +1635,41 @@ impl Node {
 
                 if let Some((cluster, _side)) =
                     Cluster::from_point_exact(layout, x * scale, y * scale)
-                    && {
-                        // Parley's line lookup clamps to the first/last line,
-                        // including for exact cluster hits. That is useful for
-                        // caret placement, but must not expand pointer targets
-                        // into padding or the gap below a caption.
-                        let line = cluster.line();
-                        let metrics = line.metrics();
-                        y * scale >= metrics.block_min_coord && y * scale < metrics.block_max_coord
-                    }
                 {
-                    let node_id = cluster.style().brush.id;
-                    let text_pointer_events_none = self
-                        .with(node_id)
-                        .primary_styles()
-                        .is_some_and(|style| style.clone_pointer_events() == PointerEvents::None);
-                    if !text_pointer_events_none {
-                        return Some(HitResult {
-                            node_id,
-                            x,
-                            y,
-                            is_text: true,
+                    let line = cluster.line();
+                    let mut node_id = cluster.style().brush.id;
+                    // The text editor deliberately uses line boxes for caret
+                    // placement. Pointer targets use each inline span's own
+                    // content bounds, the same metrics exported by CSSOM.
+                    loop {
+                        let target = self.with(node_id);
+                        let bounds = ild.span_block_bounds(line, target, self);
+                        let contains_y = bounds
+                            .is_some_and(|(top, bottom)| y * scale >= top && y * scale < bottom);
+                        let pointer_events_none = target.primary_styles().is_some_and(|style| {
+                            style.clone_pointer_events() == PointerEvents::None
                         });
+                        let hidden = target.primary_styles().is_some_and(|style| {
+                            matches!(
+                                style.clone_visibility(),
+                                Visibility::Hidden | Visibility::Collapse
+                            )
+                        });
+                        if contains_y && !pointer_events_none && !hidden {
+                            return Some(HitResult {
+                                node_id,
+                                x,
+                                y,
+                                is_text: true,
+                            });
+                        }
+                        if node_id == self.id {
+                            break;
+                        }
+                        let Some(parent) = target.parent else {
+                            break;
+                        };
+                        node_id = parent;
                     }
                 }
             }

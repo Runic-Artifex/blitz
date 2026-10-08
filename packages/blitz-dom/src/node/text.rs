@@ -6,6 +6,7 @@ use blitz_traits::{
 use color::{AlphaColor, Srgb};
 use keyboard_types::{Key, Modifiers};
 use parley::{ContentWidths, FontContext, LayoutContext};
+use taffy::{CoreStyle as _, ResolveOrZero as _};
 
 use crate::util::ACTION_MOD;
 
@@ -32,6 +33,41 @@ pub struct TextLayout {
 impl TextLayout {
     pub fn new() -> Self {
         Default::default()
+    }
+
+    /// The style span of an element flattened into this inline context.
+    pub(crate) fn style_index(&self, node_id: NodeId) -> Option<usize> {
+        self.layout
+            .styles()
+            .iter()
+            .position(|style| style.brush.id == node_id)
+    }
+
+    /// Shared block-axis border bounds of a non-atomic inline span. Its own
+    /// font content area is expanded by padding/border, never by line leading
+    /// or descendants. Vertical percentage padding uses the context's width.
+    pub(crate) fn span_block_bounds(
+        &self,
+        line: parley::Line<'_, TextBrush>,
+        node: &crate::Node,
+        root: &crate::Node,
+    ) -> Option<(f32, f32)> {
+        let (top, bottom) = line.style_content_bounds(self.style_index(node.id)?)?;
+        let root_layout = root.unrounded_layout();
+        let width = root_layout.size.width
+            - root_layout.padding.left
+            - root_layout.padding.right
+            - root_layout.border.left
+            - root_layout.border.right;
+        let style = node.layout_style();
+        let inset = style
+            .padding()
+            .resolve_or_zero(Some(width), crate::layout::resolve_calc_value)
+            + style
+                .border()
+                .resolve_or_zero(Some(width), crate::layout::resolve_calc_value);
+        let scale = self.layout.scale();
+        Some((top - inset.top * scale, bottom + inset.bottom * scale))
     }
 
     pub fn content_widths(&mut self) -> ContentWidths {

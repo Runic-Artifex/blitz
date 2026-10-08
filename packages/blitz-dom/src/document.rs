@@ -2748,6 +2748,22 @@ impl BaseDocument {
         let mut rects: Vec<BoundingRect> = Vec::new();
         for line in layout.lines() {
             let line_metrics = line.metrics();
+            // An inline element's content area uses its own first available
+            // font, not the line-height box or the extents of taller children.
+            let (content_top, content_bottom) =
+                inline_layout.span_block_bounds(line, node, inline_root)?;
+            let line_start = line_metrics.inline_min_coord + line_metrics.offset;
+            let (visible_start, visible_end) = if layout.is_rtl() {
+                (
+                    line_start + line_metrics.hanging_advance,
+                    line_start + line_metrics.advance,
+                )
+            } else {
+                (
+                    line_start,
+                    line_start + line_metrics.advance - line_metrics.hanging_advance,
+                )
+            };
             // Union all of the target's fragments on this line into a single rect
             let mut line_rect: Option<(f64, f64, f64, f64)> = None;
             let mut add = |x0: f64, y0: f64, x1: f64, y1: f64| {
@@ -2765,15 +2781,28 @@ impl BaseDocument {
                         if !is_in_target(glyph_run.style().brush.id) {
                             continue;
                         }
-                        let x0 = glyph_run.offset() as f64;
-                        let x1 = x0 + glyph_run.advance() as f64;
-                        // Use the line box's block extent rather than the
-                        // run's font ascent/descent: fonts with small
-                        // typographic metrics would otherwise produce rects
-                        // that clip the rendered glyphs. This matches the
-                        // geometry used for text selection highlights.
-                        let y0 = line_metrics.block_min_coord as f64;
-                        let y1 = line_metrics.block_max_coord as f64;
+                        // Collapsible whitespace at a soft wrap hangs outside
+                        // the element's fragment; preserved whitespace still
+                        // participates according to Parley's hanging policy.
+                        let collapses = self
+                            .get_node(glyph_run.style().brush.id)
+                            .and_then(|node| node.primary_styles())
+                            .is_some_and(|style| {
+                                matches!(style.clone_white_space_collapse(),
+                                style::computed_values::white_space_collapse::T::Collapse
+                                | style::computed_values::white_space_collapse::T::PreserveBreaks)
+                            });
+                        let mut x0 = glyph_run.offset() as f64;
+                        let mut x1 = x0 + glyph_run.advance() as f64;
+                        if collapses {
+                            x0 = x0.max(visible_start as f64);
+                            x1 = x1.min(visible_end as f64);
+                        }
+                        if x1 < x0 {
+                            continue;
+                        }
+                        let y0 = content_top as f64;
+                        let y1 = content_bottom as f64;
                         add(x0, y0, x1, y1);
                     }
                     PositionedLayoutItem::InlineBox(inline_box) => {
@@ -2781,12 +2810,11 @@ impl BaseDocument {
                             continue;
                         }
                         let x0 = inline_box.x as f64;
-                        let y0 = inline_box.y as f64;
                         add(
                             x0,
-                            y0,
+                            content_top as f64,
                             x0 + inline_box.width as f64,
-                            y0 + inline_box.height as f64,
+                            content_bottom as f64,
                         );
                     }
                 }

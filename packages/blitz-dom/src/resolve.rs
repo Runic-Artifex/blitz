@@ -257,6 +257,53 @@ impl BaseDocument {
         let h = self.nodes[node_id].final_layout().size.height as f64 * scale;
         let mut overflow = Rect::new(0.0, 0.0, w, h);
 
+        // Font content can extend beyond a short authored line-height. Keep
+        // that visual extent in the traversal bounds so ancestor hit/culling
+        // checks can reach the inline span. CSS scroll extents still use
+        // Taffy's independent scrollable_overflow_rect.
+        let node = &self.nodes[node_id];
+        if let Some(inline) = node
+            .element_data()
+            .and_then(|el| el.inline_layout_data.as_ref())
+        {
+            if !inline.text.is_empty() {
+                let layout = node.final_layout();
+                let x = f64::from(layout.border.left + layout.padding.left) * scale;
+                let y = f64::from(layout.border.top + layout.padding.top) * scale;
+                for line in inline.layout.lines() {
+                    let metrics = line.metrics();
+                    let start = f64::from(metrics.inline_min_coord + metrics.offset);
+                    overflow = overflow.union(Rect::new(
+                        x + start,
+                        y + f64::from(metrics.content_block_min_coord),
+                        x + start + f64::from(metrics.advance),
+                        y + f64::from(metrics.content_block_max_coord),
+                    ));
+                    for item in line.items() {
+                        let parley::PositionedLayoutItem::GlyphRun(run) = item else {
+                            continue;
+                        };
+                        let mut span_id = run.style().brush.id;
+                        while span_id != node_id {
+                            let span = &self.nodes[span_id];
+                            let Some((top, bottom)) = inline.span_block_bounds(line, span, node)
+                            else {
+                                break;
+                            };
+                            overflow = overflow.union(Rect::new(
+                                x + f64::from(run.offset()),
+                                y + f64::from(top),
+                                x + f64::from(run.offset() + run.advance()),
+                                y + f64::from(bottom),
+                            ));
+                            let Some(parent) = span.parent else { break };
+                            span_id = parent;
+                        }
+                    }
+                }
+            }
+        }
+
         let layout_children = std::mem::take(self.nodes[node_id].layout_children.get_mut());
 
         if let Some(ref children) = layout_children {
