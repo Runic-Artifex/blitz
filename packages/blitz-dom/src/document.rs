@@ -114,8 +114,8 @@ mod document_mode_tests {
         ] {
             let device = make_device(
                 &doc.viewport,
-                doc.media_type,
-                doc.quirks_mode,
+                doc.media_type.clone(),
+                doc.quirks_mode(),
                 doc.font_ctx.clone(),
             )
             .with_line_width_rounding(policy);
