@@ -1060,6 +1060,7 @@ impl BaseDocument {
             inline_layout
                 .layout
                 .lines()
+                .take(trailing_empty_line.unwrap_or(line_count))
                 .map(|line| line.metrics().content_block_max_coord / scale)
                 .fold(0.0_f32, f32::max)
         };
