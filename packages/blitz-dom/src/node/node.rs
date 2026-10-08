@@ -1662,15 +1662,13 @@ impl Node {
                         };
                         let mut node_id = run.style().brush.id;
                         let owner = self.with(node_id);
-                        if owner.primary_styles().is_some_and(|style| {
+                        let owner_ineligible = owner.primary_styles().is_some_and(|style| {
                             style.clone_pointer_events() == PointerEvents::None
                                 || matches!(
                                     style.clone_visibility(),
                                     Visibility::Hidden | Visibility::Collapse
                                 )
-                        }) {
-                            continue;
-                        }
+                        });
                         let Some((start, end)) =
                             ild.run_inline_bounds(line, &run, self.with(node_id))
                         else {
@@ -1678,17 +1676,18 @@ impl Node {
                         };
                         // Text fragments use their style's primary font, with
                         // neither leading nor the span's padding/border insets.
-                        let text_contains = ild
-                            .style_index(node_id)
-                            .and_then(|index| line.style_content_bounds(index))
-                            .is_some_and(|(top, bottom)| {
-                                text_location.intersects_snapped_rect(KurboRect::new(
-                                    start as f64 / scale as f64,
-                                    top as f64 / scale as f64,
-                                    end as f64 / scale as f64,
-                                    bottom as f64 / scale as f64,
-                                ))
-                            });
+                        let text_contains = !owner_ineligible
+                            && ild
+                                .style_index(node_id)
+                                .and_then(|index| line.style_content_bounds(index))
+                                .is_some_and(|(top, bottom)| {
+                                    text_location.intersects_snapped_rect(KurboRect::new(
+                                        start as f64 / scale as f64,
+                                        top as f64 / scale as f64,
+                                        end as f64 / scale as f64,
+                                        bottom as f64 / scale as f64,
+                                    ))
+                                });
                         loop {
                             // The formatting root has its own block box. It is
                             // not a culled inline ancestor of a hidden/inert run.
