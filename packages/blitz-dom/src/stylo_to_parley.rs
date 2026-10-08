@@ -407,6 +407,20 @@ pub(crate) fn vertical_align(
     parley::VerticalAlign::new(alignment, shift)
 }
 
+/// Atomic boxes bypass Parley's text-style resolver, so their length shifts must
+/// already be in layout units, like their dimensions and baselines.
+pub(crate) fn inline_box_vertical_align(
+    style: &stylo::ComputedValues,
+    parent_font_size: Option<f32>,
+    scale: f32,
+) -> parley::VerticalAlign {
+    let mut align = vertical_align(style, parent_font_size);
+    if let parley::BaselineShift::Length(length) = &mut align.shift {
+        *length *= scale;
+    }
+    align
+}
+
 pub(crate) fn style(
     span_id: NodeId,
     style: &stylo::ComputedValues,

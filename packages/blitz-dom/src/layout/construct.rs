@@ -1242,13 +1242,13 @@ pub(crate) fn build_inline_layout_into(
     };
 
     if let Some(before_id) = root_node.before() {
-        build_inline_layout_recursive(&mut builder, nodes, before_id, text_transform);
+        build_inline_layout_recursive(&mut builder, nodes, before_id, text_transform, scale);
     }
     for child_id in root_node.children.iter().copied() {
-        build_inline_layout_recursive(&mut builder, nodes, child_id, text_transform);
+        build_inline_layout_recursive(&mut builder, nodes, child_id, text_transform, scale);
     }
     if let Some(after_id) = root_node.after() {
-        build_inline_layout_recursive(&mut builder, nodes, after_id, text_transform);
+        build_inline_layout_recursive(&mut builder, nodes, after_id, text_transform, scale);
     }
 
     (text_layout.text, text_layout.sources) =
@@ -1261,6 +1261,7 @@ pub(crate) fn build_inline_layout_into(
         nodes: &crate::NodeTree,
         node_id: NodeId,
         parent_text_transform: TextTransform,
+        scale: f32,
     ) {
         let node = &nodes[node_id];
 
@@ -1317,7 +1318,13 @@ pub(crate) fn build_inline_layout_into(
                         );
                         for child_id in node.children.iter().copied() {
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
-                            build_inline_layout_recursive(builder, nodes, child_id, text_transform);
+                            build_inline_layout_recursive(
+                                builder,
+                                nodes,
+                                child_id,
+                                text_transform,
+                                scale,
+                            );
                         }
                         builder.pop_style_span();
                     }
@@ -1337,9 +1344,10 @@ pub(crate) fn build_inline_layout_into(
                                 vertical_align: node
                                     .primary_styles()
                                     .map(|s| {
-                                        stylo_to_parley::vertical_align(
+                                        stylo_to_parley::inline_box_vertical_align(
                                             &s,
                                             parent_font_size(nodes, node),
+                                            scale,
                                         )
                                     })
                                     .unwrap_or_default(),
@@ -1378,6 +1386,7 @@ pub(crate) fn build_inline_layout_into(
                                     nodes,
                                     before_id,
                                     text_transform,
+                                    scale,
                                 );
                             }
 
@@ -1387,6 +1396,7 @@ pub(crate) fn build_inline_layout_into(
                                     nodes,
                                     child_id,
                                     text_transform,
+                                    scale,
                                 );
                             }
                             if let Some(after_id) = node.after() {
@@ -1395,6 +1405,7 @@ pub(crate) fn build_inline_layout_into(
                                     nodes,
                                     after_id,
                                     text_transform,
+                                    scale,
                                 );
                             }
 
@@ -1415,9 +1426,10 @@ pub(crate) fn build_inline_layout_into(
                             vertical_align: node
                                 .primary_styles()
                                 .map(|s| {
-                                    stylo_to_parley::vertical_align(
+                                    stylo_to_parley::inline_box_vertical_align(
                                         &s,
                                         parent_font_size(nodes, node),
+                                        scale,
                                     )
                                 })
                                 .unwrap_or_default(),
