@@ -51,9 +51,11 @@ impl HitLocation {
         if !determinant.is_finite() || determinant == 0.0 || !scale.is_finite() || scale <= 0.0 {
             return None;
         }
+        let (correction, residual) = layer_phase(self.paint_offset, transform);
+        let location = self.translated(correction.x, correction.y);
         let inverse = Affine::scale(1.0 / scale) * transform.inverse() * Affine::scale(scale);
-        let point = inverse * self.point;
-        let quad = self.quad.map(|p| inverse * p);
+        let point = inverse * location.point;
+        let quad = location.quad.map(|p| inverse * p);
         if !point.x.is_finite()
             || !point.y.is_finite()
             || quad.iter().any(|p| !p.x.is_finite() || !p.y.is_finite())
@@ -68,7 +70,7 @@ impl HitLocation {
                 let edge = quad[(i + 1) % 4] - quad[i];
                 edge.x == 0.0 || edge.y == 0.0
             }),
-            paint_offset: Vec2::ZERO,
+            paint_offset: residual,
         })
     }
 
@@ -172,7 +174,7 @@ impl HitLocation {
 impl crate::Node {
     /// Conservative bounds for hoisted candidates in the same logical position
     /// space as CSSOM and raw pointer boxes; the painter's cache stays separate.
-    pub(crate) fn hoisted_hit_bounds(&self, scale: f64) -> Option<Rect> {
+    pub(crate) fn hoisted_hit_bounds(&self, location: HitLocation, scale: f64) -> Option<Rect> {
         let context = self.stacking_context.as_ref()?;
         let mut bounds: Option<Rect> = None;
         for child in context
@@ -185,7 +187,7 @@ impl crate::Node {
                 self.id,
                 child.node_id,
             );
-            let location = node.logical_visual_location();
+            let location_for_node = node.logical_visual_location();
             let overflow = *node.scrollable_overflow();
             let size = node.unrounded_layout().size;
             let mut rect = Rect::new(
@@ -195,19 +197,44 @@ impl crate::Node {
                 overflow.y1 / scale,
             )
             .union(Rect::new(0.0, 0.0, size.width as f64, size.height as f64));
+            let mut offset = Vec2::new(
+                (position.x + location_for_node.x) as f64,
+                (position.y + location_for_node.y) as f64,
+            );
             if let Some(transform) = node.transform().as_deref() {
                 rect = (Affine::scale(1.0 / scale) * *transform * Affine::scale(scale))
                     .transform_rect_bbox(rect);
+                offset -= layer_phase(location.paint_offset + offset, *transform).0;
             }
-            rect = rect
-                + Vec2::new(
-                    (position.x + location.x) as f64,
-                    (position.y + location.y) as f64,
-                );
+            rect = rect + offset;
             bounds = Some(bounds.map_or(rect, |bounds| bounds.union(rect)));
         }
         bounds
     }
+}
+
+/// Paint-offset translations round once at a transform layer boundary. Only
+/// translation and unit-scale axes carry their remaining subpixel accumulation.
+fn layer_phase(offset: Vec2, transform: Affine) -> (Vec2, Vec2) {
+    let [a, b, c, d, _, _] = transform.as_coeffs();
+    let residual = Vec2::new(
+        offset.x - (offset.x + 0.5).floor(),
+        offset.y - (offset.y + 0.5).floor(),
+    );
+    let diagonal = b == 0.0 && c == 0.0;
+    let propagated = Vec2::new(
+        if diagonal && a == 1.0 {
+            residual.x
+        } else {
+            0.0
+        },
+        if diagonal && d == 1.0 {
+            residual.y
+        } else {
+            0.0
+        },
+    );
+    (residual - propagated, propagated)
 }
 
 fn positive_rect(rect: Rect) -> bool {
@@ -292,6 +319,26 @@ mod tests {
                 .inverse_transform(Affine::scale(0.0), 1.0)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn transform_layers_preserve_subpixels_only_on_unit_scale_axes() {
+        let query = HitLocation::new(10.75, 20.75).translated(-10.375, -20.375);
+        let identity = query.inverse_transform(Affine::IDENTITY, 1.0).unwrap();
+        assert_eq!(identity.point(), Point::new(0.375, 0.375));
+        assert_eq!(identity.paint_offset, Vec2::new(0.375, 0.375));
+        let mixed = query
+            .inverse_transform(Affine::scale_non_uniform(1.0, 0.5), 1.0)
+            .unwrap();
+        assert_eq!(mixed.point(), Point::new(0.375, 1.5));
+        assert_eq!(mixed.paint_offset, Vec2::new(0.375, 0.0));
+        assert_eq!(mixed.bounds.size(), kurbo::Size::new(1.0, 2.0));
+        let negative = HitLocation::new(0.0, 0.0)
+            .translated(0.5, 0.5)
+            .inverse_transform(Affine::scale(0.5), 1.0)
+            .unwrap();
+        assert_eq!(negative.point(), Point::ZERO);
+        assert_eq!(negative.paint_offset, Vec2::ZERO);
     }
 
     #[test]
