@@ -1633,44 +1633,62 @@ impl Node {
                 let layout = &ild.layout;
                 let scale = layout.scale();
 
-                if let Some((cluster, _side)) =
-                    Cluster::from_point_exact(layout, x * scale, y * scale)
-                {
-                    let line = cluster.line();
-                    let mut node_id = cluster.style().brush.id;
-                    // The text editor deliberately uses line boxes for caret
-                    // placement. Pointer targets use each inline span's own
-                    // content bounds, the same metrics exported by CSSOM.
-                    loop {
-                        let target = self.with(node_id);
-                        let bounds = ild.span_block_bounds(line, target, self);
-                        let contains_y = bounds
-                            .is_some_and(|(top, bottom)| y * scale >= top && y * scale < bottom);
-                        let pointer_events_none = target.primary_styles().is_some_and(|style| {
-                            style.clone_pointer_events() == PointerEvents::None
-                        });
-                        let hidden = target.primary_styles().is_some_and(|style| {
-                            matches!(
-                                style.clone_visibility(),
-                                Visibility::Hidden | Visibility::Collapse
-                            )
-                        });
-                        if contains_y && !pointer_events_none && !hidden {
-                            return Some(HitResult {
-                                node_id,
-                                x,
-                                y,
-                                is_text: true,
-                            });
-                        }
-                        if node_id == self.id {
-                            break;
-                        }
-                        let Some(parent) = target.parent else {
-                            break;
+                // Caret lookup selects a line box. Pointer targets instead
+                // use positioned font-content fragments: short line heights
+                // and a terminal synthetic empty line must not hide text.
+                // Later painted runs win where content areas overlap.
+                let mut text_hit = None;
+                for line in layout.lines() {
+                    for item in line.items() {
+                        let parley::PositionedLayoutItem::GlyphRun(run) = item else {
+                            continue;
                         };
-                        node_id = parent;
+                        let mut node_id = run.style().brush.id;
+                        let Some((start, end)) =
+                            ild.run_inline_bounds(line, &run, self.with(node_id))
+                        else {
+                            continue;
+                        };
+                        if x * scale < start || x * scale >= end {
+                            continue;
+                        }
+                        loop {
+                            let target = self.with(node_id);
+                            let bounds = ild.span_block_bounds(line, target, self);
+                            let contains_y = bounds.is_some_and(|(top, bottom)| {
+                                y * scale >= top && y * scale < bottom
+                            });
+                            let pointer_events_none =
+                                target.primary_styles().is_some_and(|style| {
+                                    style.clone_pointer_events() == PointerEvents::None
+                                });
+                            let hidden = target.primary_styles().is_some_and(|style| {
+                                matches!(
+                                    style.clone_visibility(),
+                                    Visibility::Hidden | Visibility::Collapse
+                                )
+                            });
+                            if contains_y && !pointer_events_none && !hidden {
+                                text_hit = Some(HitResult {
+                                    node_id,
+                                    x,
+                                    y,
+                                    is_text: true,
+                                });
+                                break;
+                            }
+                            if node_id == self.id {
+                                break;
+                            }
+                            let Some(parent) = target.parent else {
+                                break;
+                            };
+                            node_id = parent;
+                        }
                     }
+                }
+                if text_hit.is_some() {
+                    return text_hit;
                 }
             }
         }

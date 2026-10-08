@@ -43,6 +43,43 @@ impl TextLayout {
             .position(|style| style.brush.id == node_id)
     }
 
+    /// The visible advance of a positioned run. Collapsed hanging whitespace
+    /// is outside the fragment; preserved whitespace stays in its border area.
+    pub(crate) fn run_inline_bounds(
+        &self,
+        line: parley::Line<'_, TextBrush>,
+        run: &parley::layout::GlyphRun<'_, TextBrush>,
+        node: &crate::Node,
+    ) -> Option<(f32, f32)> {
+        let mut start = run.offset();
+        let mut end = start + run.advance();
+        let collapses = node.primary_styles().is_some_and(|style| {
+            matches!(
+                style.clone_white_space_collapse(),
+                style::computed_values::white_space_collapse::T::Collapse
+                    | style::computed_values::white_space_collapse::T::PreserveBreaks
+            )
+        });
+        if collapses {
+            let metrics = line.metrics();
+            let line_start = metrics.inline_min_coord + metrics.offset;
+            let (visible_start, visible_end) = if self.layout.is_rtl() {
+                (
+                    line_start + metrics.hanging_advance,
+                    line_start + metrics.advance,
+                )
+            } else {
+                (
+                    line_start,
+                    line_start + metrics.advance - metrics.hanging_advance,
+                )
+            };
+            start = start.max(visible_start);
+            end = end.min(visible_end);
+        }
+        (end >= start).then_some((start, end))
+    }
+
     /// Shared block-axis border bounds of a non-atomic inline span. Its own
     /// font content area is expanded by padding/border, never by line leading
     /// or descendants. Vertical percentage padding uses the context's width.
