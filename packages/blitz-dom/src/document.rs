@@ -132,9 +132,12 @@ mod document_mode_tests {
                 .0
                 .to_f32_px();
             assert!((width - expected).abs() < 0.00001);
-            let used = doc.nodes[node].final_layout().border.left;
+            // Taffy's ordinary block rounding is a later layout operation. Check
+            // its unrounded input here so the device-pixel control proves the
+            // cache actually changed from 1px to .8px, rather than rounding back.
+            let used = doc.nodes[node].unrounded_layout().border.left;
             assert!(
-                (used - expected).abs() <= 1.0 / 64.0,
+                (used - expected).abs() < 0.00001,
                 "{policy:?}: used {used}, expected {expected}"
             );
             assert_eq!(doc.stylist.device().app_units_per_device_pixel(), 48);
