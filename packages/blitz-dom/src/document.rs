@@ -2584,7 +2584,13 @@ impl BaseDocument {
                 .map(|r| r.y + r.height)
                 .fold(f64::NEG_INFINITY, f64::max);
             return match rects.is_empty() {
-                true => None,
+                // CSSOM View returns a zero rectangle when getClientRects() is empty.
+                true => Some(BoundingRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                }),
                 false => Some(BoundingRect {
                     x: x0,
                     y: y0,
