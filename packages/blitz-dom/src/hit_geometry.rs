@@ -169,6 +169,47 @@ impl HitLocation {
     }
 }
 
+impl crate::Node {
+    /// Conservative bounds for hoisted candidates in the same logical position
+    /// space as CSSOM and raw pointer boxes; the painter's cache stays separate.
+    pub(crate) fn hoisted_hit_bounds(&self, scale: f64) -> Option<Rect> {
+        let context = self.stacking_context.as_ref()?;
+        let mut bounds: Option<Rect> = None;
+        for child in context
+            .neg_z_hoisted_children()
+            .chain(context.pos_z_hoisted_children())
+        {
+            let node = self.with(child.node_id);
+            let position = crate::layout::paint_tree::logical_hoisted_child_position(
+                self.tree(),
+                self.id,
+                child.node_id,
+            );
+            let location = node.logical_visual_location();
+            let overflow = *node.scrollable_overflow();
+            let size = node.unrounded_layout().size;
+            let mut rect = Rect::new(
+                overflow.x0 / scale,
+                overflow.y0 / scale,
+                overflow.x1 / scale,
+                overflow.y1 / scale,
+            )
+            .union(Rect::new(0.0, 0.0, size.width as f64, size.height as f64));
+            if let Some(transform) = node.transform().as_deref() {
+                rect = (Affine::scale(1.0 / scale) * *transform * Affine::scale(scale))
+                    .transform_rect_bbox(rect);
+            }
+            rect = rect
+                + Vec2::new(
+                    (position.x + location.x) as f64,
+                    (position.y + location.y) as f64,
+                );
+            bounds = Some(bounds.map_or(rect, |bounds| bounds.union(rect)));
+        }
+        bounds
+    }
+}
+
 fn positive_rect(rect: Rect) -> bool {
     rect.x0.is_finite()
         && rect.y0.is_finite()

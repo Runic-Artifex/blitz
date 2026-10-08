@@ -1442,7 +1442,7 @@ impl Node {
             .primary_styles()
             .is_some_and(|style| style.clone_pointer_events() == PointerEvents::None);
 
-        let position = self.visual_location();
+        let position = self.logical_visual_location();
         let mut box_location = location.translated(-f64::from(position.x), -f64::from(position.y));
         if let Some(t) = self.transform().as_deref() {
             box_location = box_location.inverse_transform(*t, scale)?;
@@ -1452,7 +1452,7 @@ impl Node {
         let location = box_location.translated(self.scroll_offset().x, self.scroll_offset().y);
         let mut x = location.point().x as f32;
         let mut y = location.point().y as f32;
-        let size = self.final_layout().size;
+        let size = self.unrounded_layout().size;
         let is_table_cell = self
             .display_style()
             .is_some_and(|d| d.inside() == DisplayInside::TableCell);
@@ -1461,7 +1461,7 @@ impl Node {
                 s.clone_border_collapse() == style::computed_values::border_collapse::T::Collapse
             });
             let inset = if collapsed {
-                self.final_layout().border
+                self.unrounded_layout().border
             } else {
                 taffy::Rect::ZERO
             };
@@ -1484,7 +1484,7 @@ impl Node {
             self.rounded_box_intersects(box_location, taffy::Rect::ZERO)
         };
 
-        let overflow_rect = self.final_layout().scrollable_overflow_rect;
+        let overflow_rect = self.unrounded_layout().scrollable_overflow_rect;
         let matches_content = location.intersects_rect(KurboRect::new(
             0.0,
             0.0,
@@ -1492,20 +1492,9 @@ impl Node {
             overflow_rect.bottom as f64 + self.scroll_offset().y,
         ));
 
-        let matches_hoisted_content = match &self.stacking_context {
-            Some(sc) => {
-                // Both the point (after the scroll adjustment above) and the
-                // bbox are in this node's unscrolled content coordinates.
-                let bbox = sc.hoisted_content_bbox(self.tree(), self.id, scale);
-                location.intersects_rect(KurboRect::new(
-                    bbox.left as f64,
-                    bbox.top as f64,
-                    bbox.right as f64,
-                    bbox.bottom as f64,
-                ))
-            }
-            None => false,
-        };
+        let matches_hoisted_content = self
+            .hoisted_hit_bounds(scale)
+            .is_some_and(|bounds| location.intersects_rect(bounds));
 
         // `scrollable_overflow` is stored in device (scaled) pixels, whereas the
         // coordinates here are in CSS pixels, so unscale it before comparing.
@@ -1550,7 +1539,7 @@ impl Node {
         // Descendants are painted clipped (see `clips_overflow`), so outside
         // the clip only this node's own box can be hit.
         if self.clips_overflow() {
-            let layout = self.final_layout();
+            let layout = self.unrounded_layout();
             let mut inset = layout.border;
             if self
                 .element_data()
@@ -1570,8 +1559,8 @@ impl Node {
         }
 
         let content_box_offset = taffy::Point {
-            x: self.final_layout().padding.left + self.final_layout().border.left,
-            y: self.final_layout().padding.top + self.final_layout().border.top,
+            x: self.unrounded_layout().padding.left + self.unrounded_layout().border.left,
+            y: self.unrounded_layout().padding.top + self.unrounded_layout().border.top,
         };
 
         // Positive z_index hoisted children
@@ -1581,7 +1570,11 @@ impl Node {
                     if !self.hoisted_clips_contain(hoisted_child, location, scale) {
                         continue;
                     }
-                    let pos = hoisted_child.position(self.tree(), self.id);
+                    let pos = crate::layout::paint_tree::logical_hoisted_child_position(
+                        self.tree(),
+                        self.id,
+                        hoisted_child.node_id,
+                    );
                     let child_location = location.translated(-f64::from(pos.x), -f64::from(pos.y));
                     if let Some(hit) =
                         self.with(hoisted_child.node_id)
@@ -1623,7 +1616,11 @@ impl Node {
                     if !self.hoisted_clips_contain(hoisted_child, location, scale) {
                         continue;
                     }
-                    let pos = hoisted_child.position(self.tree(), self.id);
+                    let pos = crate::layout::paint_tree::logical_hoisted_child_position(
+                        self.tree(),
+                        self.id,
+                        hoisted_child.node_id,
+                    );
                     let child_location = location.translated(-f64::from(pos.x), -f64::from(pos.y));
                     if let Some(hit) =
                         self.with(hoisted_child.node_id)
@@ -1669,6 +1666,14 @@ impl Node {
                         else {
                             continue;
                         };
+                        let metrics = run.run().font_metrics();
+                        let font_rect = KurboRect::new(
+                            start as f64 / scale as f64,
+                            (run.baseline() - metrics.ascent) as f64 / scale as f64,
+                            end as f64 / scale as f64,
+                            (run.baseline() + metrics.descent) as f64 / scale as f64,
+                        );
+                        let text_contains = text_location.intersects_snapped_rect(font_rect);
                         loop {
                             let target = self.with(node_id);
                             let bounds = ild.span_block_bounds(line, target, self);
@@ -1679,13 +1684,8 @@ impl Node {
                                     end as f64 / scale as f64,
                                     bottom as f64 / scale as f64,
                                 );
-                                // Text uses snapped bounds; culled inline ancestors
-                                // retain their own raw physical fragment rectangle.
-                                if node_id == run.style().brush.id {
-                                    text_location.intersects_snapped_rect(rect)
-                                } else {
-                                    text_location.intersects_rect(rect)
-                                }
+                                text_location.intersects_rect(rect)
+                                    || (node_id == run.style().brush.id && text_contains)
                             });
                             let pointer_events_none =
                                 target.primary_styles().is_some_and(|style| {
@@ -1814,9 +1814,9 @@ impl Node {
     /// Computes the Document-relative coordinates of the `Node` from the unrounded
     /// (sub-pixel) layout, for CSSOM geometry APIs such as `getBoundingClientRect`
     pub fn unrounded_absolute_position(&self, x: f32, y: f32) -> crate::util::Point<f32> {
-        let offset = self.sticky_offset();
-        let x = x + self.unrounded_layout().location.x + offset.x - self.scroll_offset().x as f32;
-        let y = y + self.unrounded_layout().location.y + offset.y - self.scroll_offset().y as f32;
+        let location = self.logical_visual_location();
+        let x = x + location.x - self.scroll_offset().x as f32;
+        let y = y + location.y - self.scroll_offset().y as f32;
 
         self.containing_block()
             .map(|i| self.with(i).unrounded_absolute_position(x, y))

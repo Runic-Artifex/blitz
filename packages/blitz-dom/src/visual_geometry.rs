@@ -25,7 +25,7 @@ impl Node {
         location: HitLocation,
         inset: taffy::Rect<f32>,
     ) -> bool {
-        let size = self.final_layout().size;
+        let size = self.unrounded_layout().size;
         let (left, top, right, bottom) = (
             inset.left,
             inset.top,
@@ -88,6 +88,12 @@ impl Node {
             let ry = (ry - if on_top { inset.top } else { inset.bottom }).max(0.0);
             (rx as f64, ry as f64)
         });
+        let rounded = radii.iter().any(|&(x, y)| x > 0.0 && y > 0.0);
+        let rect = if rounded {
+            location.snapped_rect(rect)
+        } else {
+            rect
+        };
         location.intersects_rounded_rect(rect, radii)
     }
 
@@ -102,10 +108,14 @@ impl Node {
             .into_iter()
             .all(|id| {
                 let node = self.with(id);
-                let position = crate::hoisted_child_position(self.tree(), self.id, id);
+                let position = crate::layout::paint_tree::logical_hoisted_child_position(
+                    self.tree(),
+                    self.id,
+                    id,
+                );
                 let mut hit = location.translated(
-                    -(position.x + node.visual_location().x) as f64,
-                    -(position.y + node.visual_location().y) as f64,
+                    -(position.x + node.logical_visual_location().x) as f64,
+                    -(position.y + node.logical_visual_location().y) as f64,
                 );
                 if let Some(transform) = node.transform().as_deref() {
                     let Some(transformed) = hit.inverse_transform(*transform, scale) else {
@@ -113,7 +123,7 @@ impl Node {
                     };
                     hit = transformed;
                 }
-                node.rounded_box_intersects(hit, node.final_layout().border)
+                node.rounded_box_intersects(hit, node.unrounded_layout().border)
             })
     }
 
@@ -121,6 +131,17 @@ impl Node {
     /// sizing, offsets and overflow retain the original `Layout.location`.
     pub fn visual_location(&self) -> Point<f32> {
         let location = self.final_layout().location;
+        let offset = self.sticky_offset();
+        Point {
+            x: location.x + offset.x,
+            y: location.y + offset.y,
+        }
+    }
+
+    /// Used CSS position shared by CSSOM and pointer geometry. Paint retains
+    /// Taffy's rounded boxes; raw physical hit rectangles retain layout precision.
+    pub(crate) fn logical_visual_location(&self) -> Point<f32> {
+        let location = self.unrounded_layout().location;
         let offset = self.sticky_offset();
         Point {
             x: location.x + offset.x,

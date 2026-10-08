@@ -31,6 +31,23 @@ use taffy::{Point, Rect};
 /// hoisted by Taffy, otherwise `layout_parent`, which is set for every layout
 /// child by `resolve_layout_children`, anonymous blocks included).
 pub fn hoisted_child_position(tree: &NodeTree, sc_root_id: NodeId, child_id: NodeId) -> Point<f32> {
+    hoisted_position(tree, sc_root_id, child_id, false)
+}
+
+pub(crate) fn logical_hoisted_child_position(
+    tree: &NodeTree,
+    sc_root_id: NodeId,
+    child_id: NodeId,
+) -> Point<f32> {
+    hoisted_position(tree, sc_root_id, child_id, true)
+}
+
+fn hoisted_position(
+    tree: &NodeTree,
+    sc_root_id: NodeId,
+    child_id: NodeId,
+    logical: bool,
+) -> Point<f32> {
     let child = &tree[child_id];
     let mut position = Point::ZERO;
     let mut current = child.containing_block();
@@ -56,7 +73,11 @@ pub fn hoisted_child_position(tree: &NodeTree, sc_root_id: NodeId, child_id: Nod
         let Some(node) = tree.get(id) else {
             break;
         };
-        let location = node.visual_location();
+        let location = if logical {
+            node.logical_visual_location()
+        } else {
+            node.visual_location()
+        };
         let scroll_offset = *node.scroll_offset();
         position.x += location.x - scroll_offset.x as f32;
         position.y += location.y - scroll_offset.y as f32;
