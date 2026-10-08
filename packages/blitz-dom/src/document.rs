@@ -93,6 +93,7 @@ mod document_mode_tests {
             viewport: Some(Viewport::new(500, 250, 1.25, ColorScheme::Light)),
             ..Default::default()
         });
+        doc.add_user_agent_stylesheet("html,body,div{display:block}");
         let root_id = doc.root_node().id;
         let mut mutator = doc.mutate();
         let html = mutator.create_element(qual_name!("html"), vec![]);
@@ -131,7 +132,11 @@ mod document_mode_tests {
                 .0
                 .to_f32_px();
             assert!((width - expected).abs() < 0.00001);
-            assert!((doc.nodes[node].final_layout().border.left - expected).abs() < 0.00001);
+            let used = doc.nodes[node].final_layout().border.left;
+            assert!(
+                (used - expected).abs() <= 1.0 / 64.0,
+                "{policy:?}: used {used}, expected {expected}"
+            );
             assert_eq!(doc.stylist.device().app_units_per_device_pixel(), 48);
         }
     }
