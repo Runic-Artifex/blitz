@@ -87,6 +87,7 @@ mod document_mode_tests {
     #[test]
     fn changing_line_width_policy_recascades_cached_styles() {
         use crate::{Attribute, qual_name};
+        use blitz_traits::shell::ColorScheme;
         use style::device::servo::LineWidthRounding;
         let mut doc = BaseDocument::new(DocumentConfig {
             viewport: Some(Viewport::new(500, 250, 1.25, ColorScheme::Light)),
