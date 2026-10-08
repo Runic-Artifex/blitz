@@ -11,6 +11,7 @@ use blitz_traits::shell::{ColorScheme, Viewport};
 use parley::FontContext;
 use selectors::matching::QuirksMode;
 use style::device::Device;
+use style::device::servo::LineWidthRounding;
 use style::media_queries::MediaType;
 use style::properties::ComputedValues;
 use style::properties::style_structs::Font;
@@ -87,4 +88,5 @@ pub(crate) fn make_device(
         PointerCapabilities::default(),
         PointerCapabilities::default(),
     )
+    .with_line_width_rounding(LineWidthRounding::CssPixel)
 }
