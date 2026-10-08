@@ -244,6 +244,7 @@ pub(crate) struct DrawTextContext {
     path_scratch: Vec<NodeId>,
     deco_boxes: Vec<LineDecoration>,
     win_ascent_ratios: WinAscentCache,
+    text_origins: crate::text_origin::TextOrigins,
 }
 
 /// Resolve the CSS `text-decoration-thickness` to a device-pixel size.
@@ -610,7 +611,7 @@ fn ellipsis_glyph(font: &parley::FontData, font_size: f32, coords: &[i16]) -> Op
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stroke_text<'a>(
     scene: &mut impl PaintScene,
-    lines: impl Iterator<Item = Line<'a, TextBrush>>,
+    layout: &'a Layout<TextBrush>,
     doc: &BaseDocument,
     transform: Affine,
     scale: f64,
@@ -624,10 +625,12 @@ pub(crate) fn stroke_text<'a>(
         path_scratch,
         deco_boxes,
         win_ascent_ratios,
+        text_origins,
     } = context;
     stack.clear();
     path_scratch.clear();
     deco_boxes.clear();
+    let has_origins = text_origins.prepare(doc, inline_root_id, layout);
 
     // Persistent stack mirroring the ancestor path (inline root -> current run's
     // node) as we walk the runs. The `text-decoration-*` properties are *not*
@@ -636,7 +639,7 @@ pub(crate) fn stroke_text<'a>(
     // ancestor chain on every run, we cache each node's resolved values here and,
     // for each run, only resolve styles for the nodes newly descended into (popping
     // as we ascend). `path_scratch` is a reusable buffer for the run's node path.
-    for line in lines {
+    for line in layout.lines() {
         // Decorations accumulated for this line, keyed by decorating box, so each box is
         // painted once (spanning all its runs) using its own font — matching Firefox, which
         // draws one decoration per box rather than one stepped segment per differently-sized
@@ -676,7 +679,16 @@ pub(crate) fn stroke_text<'a>(
                             font: run.font().font.clone(),
                             font_size: run.font_size(),
                             coords: coords.to_vec(),
-                            baseline: first.baseline(),
+                            baseline: first.baseline()
+                                + if has_origins {
+                                    text_origins.offset(
+                                        line,
+                                        usize::from(first.style_index()),
+                                        scale,
+                                    )
+                                } else {
+                                    0.0
+                                },
                             glyph,
                             advance,
                             cutoff,
@@ -738,6 +750,11 @@ pub(crate) fn stroke_text<'a>(
                 };
 
                 let normalized_coords: &[i16] = bytemuck::cast_slice(run.normalized_coords());
+                let paint_offset = if has_origins {
+                    text_origins.offset(line, usize::from(glyph_run.style_index()), scale)
+                } else {
+                    0.0
+                };
                 scene.draw_glyphs(
                     font,
                     font_size,
@@ -759,7 +776,7 @@ pub(crate) fn stroke_text<'a>(
                         .map(|glyph| anyrender::Glyph {
                             id: glyph.id as _,
                             x: glyph.x,
-                            y: glyph.y,
+                            y: glyph.y + paint_offset,
                         }),
                 );
 
@@ -768,7 +785,7 @@ pub(crate) fn stroke_text<'a>(
                 // walked (see `flush_line_decorations`), so mixed font sizes within a box
                 // produce a single straight line rather than one stepped segment per run.
                 let geometry = DecorationRunGeometry {
-                    baseline: glyph_run.baseline(),
+                    baseline: glyph_run.baseline() + paint_offset,
                     ascent: metrics.ascent,
                     descent: metrics.descent,
                     underline_offset: metrics.underline_offset,
