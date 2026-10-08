@@ -468,6 +468,13 @@ impl BaseDocument {
             }
         }
 
+        // Quirks and limited-quirks blocks do not seed an empty font strut.
+        // Text on the line still contributes its own span metrics. Editors
+        // build separate layouts and keep Parley's default strut for the caret.
+        inline_layout
+            .layout
+            .set_include_root_strut(self.nodes.quirks_mode() == crate::QuirksMode::NoQuirks);
+
         // TODO: Resolve against style widths as well as known dimensions
         let text_indent = self.nodes[node_id]
             .primary_styles()

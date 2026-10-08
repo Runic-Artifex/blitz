@@ -119,6 +119,7 @@ pub fn taffy_node_id(id: NodeId) -> taffy::NodeId {
 pub fn dom_node_id(id: taffy::NodeId) -> NodeId {
     NodeId::from_u64(u64::from(id))
 }
+pub use selectors::matching::QuirksMode;
 pub use style::Atom;
 pub use style::invalidation::element::restyle_hints::RestyleHint;
 pub use style::media_queries::MediaType;

@@ -276,7 +276,7 @@ impl<'a> TDocument for BlitzNode<'a> {
     }
 
     fn quirks_mode(&self) -> QuirksMode {
-        QuirksMode::NoQuirks
+        self.tree().quirks_mode()
     }
 
     fn shared_lock(&self) -> &SharedRwLock {

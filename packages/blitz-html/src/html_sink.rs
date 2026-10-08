@@ -7,12 +7,14 @@ use std::borrow::Cow;
 use std::cell::{Cell, Ref, RefCell, RefMut};
 
 use blitz_dom::node::Attribute;
-use blitz_dom::{DocumentMutator, HtmlParserProvider, NodeId};
+use blitz_dom::{DocumentMutator, HtmlParserProvider, NodeId, QuirksMode as DocumentQuirksMode};
 use html5ever::{
     QualName,
     tendril::{StrTendril, TendrilSink},
-    tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeSink},
+    tree_builder::{ElementFlags, NodeOrText, QuirksMode as HtmlQuirksMode, TreeSink},
 };
+
+const FULL_QUIRKS_UA_CSS: &str = "table { line-height: normal; } input:not([type=image i]), textarea { box-sizing: border-box; }";
 
 /// Convert an html5ever Attribute which uses tendril for its value to a blitz Attribute
 /// which uses String.
@@ -52,7 +54,7 @@ pub struct DocumentHtmlParser<'m, 'doc> {
     pub errors: RefCell<Vec<Cow<'static, str>>>,
 
     /// The document's quirks mode.
-    pub quirks_mode: Cell<QuirksMode>,
+    pub quirks_mode: Cell<HtmlQuirksMode>,
     pub is_xml: bool,
     apply_document_quirks: bool,
 }
@@ -70,7 +72,7 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
         DocumentHtmlParser {
             document_mutator: RefCell::new(mutr),
             errors: RefCell::new(Vec::new()),
-            quirks_mode: Cell::new(QuirksMode::NoQuirks),
+            quirks_mode: Cell::new(HtmlQuirksMode::NoQuirks),
             is_xml: false,
             apply_document_quirks: false,
         }
@@ -112,7 +114,7 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
                     scripting_enabled: false, // Enables parsing of <noscript> tags
                     iframe_srcdoc: false,
                     drop_doctype: true,
-                    quirks_mode: QuirksMode::NoQuirks,
+                    quirks_mode: HtmlQuirksMode::NoQuirks,
                 },
             };
             html5ever::parse_document(sink, opts)
@@ -130,6 +132,10 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
     /// information (a `Content-Type` header or an `.xht`/`.xhtml` file extension) should use
     /// this method instead.
     pub fn parse_xml_into_mutator<'a, 'd>(mutr: &'a mut DocumentMutator<'d>, xml: &str) {
+        // This entry point parses a complete XML/XHTML document, unlike
+        // `parse_inner_html_into_mutator`; XML documents are standards mode.
+        mutr.doc.set_quirks_mode(DocumentQuirksMode::NoQuirks);
+        mutr.doc.remove_user_agent_stylesheet(FULL_QUIRKS_UA_CSS);
         let mut sink = DocumentHtmlParser::new(mutr);
         sink.is_xml = true;
         xml5ever::driver::parse_document(sink, Default::default())
@@ -152,7 +158,7 @@ impl<'m, 'doc> DocumentHtmlParser<'m, 'doc> {
                 scripting_enabled: false, // Enables parsing of <noscript> tags
                 iframe_srcdoc: false,
                 drop_doctype: true,
-                quirks_mode: QuirksMode::NoQuirks,
+                quirks_mode: HtmlQuirksMode::NoQuirks,
             },
         };
         html5ever::driver::parse_fragment_for_element(sink, opts, element_id, false, None)
@@ -182,14 +188,23 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
         Self: 'a;
 
     fn finish(self) -> Self::Output {
-        // Standards-mode tables inherit line-height. Only full documents without
-        // a standards doctype get the legacy reset; parsing innerHTML must not
-        // change the containing document's UA rules. This is the table reset,
-        // not propagation of all quirks-mode behavior into style/layout.
-        if self.apply_document_quirks && self.quirks_mode.get() == QuirksMode::Quirks {
-            self.mutr()
-                .doc
-                .add_user_agent_stylesheet("table { line-height: normal; }");
+        if self.apply_document_quirks {
+            let quirks_mode = match self.quirks_mode.get() {
+                HtmlQuirksMode::NoQuirks => DocumentQuirksMode::NoQuirks,
+                HtmlQuirksMode::LimitedQuirks => DocumentQuirksMode::LimitedQuirks,
+                HtmlQuirksMode::Quirks => DocumentQuirksMode::Quirks,
+            };
+            let mut mutr = self.mutr();
+            mutr.doc.set_quirks_mode(quirks_mode);
+            // Only full quirks documents get these UA resets. Fragments leave
+            // the containing mode and UA rules unchanged. This UA-origin rule
+            // preserves an author `box-sizing` declaration.
+            if quirks_mode == DocumentQuirksMode::Quirks {
+                mutr.doc.remove_user_agent_stylesheet(FULL_QUIRKS_UA_CSS);
+                mutr.doc.add_user_agent_stylesheet(FULL_QUIRKS_UA_CSS);
+            } else {
+                mutr.doc.remove_user_agent_stylesheet(FULL_QUIRKS_UA_CSS);
+            }
         }
         #[cfg(feature = "tracing")]
         for error in self.errors.borrow().iter() {
@@ -305,7 +320,7 @@ impl<'m, 'doc> TreeSink for DocumentHtmlParser<'m, 'doc> {
         x == y
     }
 
-    fn set_quirks_mode(&self, mode: QuirksMode) {
+    fn set_quirks_mode(&self, mode: HtmlQuirksMode) {
         self.quirks_mode.set(mode);
     }
 
@@ -342,4 +357,62 @@ fn parses_some_html() {
     doc.print_tree()
 
     // Now our tree should have some nodes in it
+}
+
+#[test]
+fn full_document_mode_survives_fragment_insertion() {
+    use blitz_dom::DocumentConfig;
+    for (doctype, expected) in [
+        ("<!doctype html>", DocumentQuirksMode::NoQuirks),
+        ("", DocumentQuirksMode::Quirks),
+        (
+            "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\" \"http://www.w3.org/TR/html4/loose.dtd\">",
+            DocumentQuirksMode::LimitedQuirks,
+        ),
+    ] {
+        let mut doc = crate::HtmlDocument::from_html(
+            &format!("{doctype}<div id=container></div>"),
+            DocumentConfig::default(),
+        );
+        assert_eq!(doc.quirks_mode(), expected);
+        let container = doc.get_element_by_id("container").unwrap();
+        DocumentHtmlParser::parse_inner_html_into_mutator(
+            &mut doc.mutate(),
+            container,
+            "<!doctype html><textarea>Text</textarea>",
+        );
+        assert_eq!(doc.quirks_mode(), expected);
+    }
+    let xml = crate::HtmlDocument::from_xml(
+        "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body/></html>",
+        DocumentConfig::default(),
+    );
+    assert_eq!(xml.quirks_mode(), DocumentQuirksMode::NoQuirks);
+}
+
+#[test]
+fn changing_document_mode_invalidates_settled_atomic_line_layout() {
+    use blitz_dom::DocumentConfig;
+    let mut doc = crate::HtmlDocument::from_html(
+        "<!doctype html><div id=line style='font:32px/60px sans-serif'><span style='display:inline-block;width:20px;height:44px'></span></div>",
+        DocumentConfig::default(),
+    );
+    let line = doc.get_element_by_id("line").unwrap();
+    doc.resolve(0.0);
+    let standard_height = doc.get_node(line).unwrap().final_layout().size.height;
+    assert!(standard_height > 44.0);
+    for mode in [
+        DocumentQuirksMode::Quirks,
+        DocumentQuirksMode::LimitedQuirks,
+    ] {
+        doc.set_quirks_mode(mode);
+        doc.resolve(0.0);
+        assert_eq!(doc.get_node(line).unwrap().final_layout().size.height, 44.0);
+        doc.set_quirks_mode(DocumentQuirksMode::NoQuirks);
+        doc.resolve(0.0);
+        assert_eq!(
+            doc.get_node(line).unwrap().final_layout().size.height,
+            standard_height
+        );
+    }
 }

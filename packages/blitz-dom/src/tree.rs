@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use blitz_traits::node_id::NodeId;
 use slotmap::{Key as _, KeyData, SlotMap};
 
-use crate::Node;
+use crate::{Node, QuirksMode};
 
 slotmap::new_key_type! {
     /// The internal [`slotmap`] key for node storage. Only used at the
@@ -33,6 +33,9 @@ fn to_id(key: NodeKey) -> NodeId {
 /// `None`, and indexing panics) instead of aliasing the new occupant.
 pub struct NodeTree {
     map: SlotMap<NodeKey, Node>,
+    /// The document mode shared by all nodes. This lives on the tree because
+    /// Stylo's `TDocument` implementation receives a node, not BaseDocument.
+    quirks_mode: QuirksMode,
     /// Bumped whenever box geometry may have moved (layout ran or a scroll
     /// offset changed). Values derived from `final_layout()` (e.g. hoisted
     /// paint child offsets) are memoised against it. Starts at 1 so that a
@@ -48,10 +51,19 @@ impl NodeTree {
     pub(crate) fn new() -> Self {
         Self {
             map: SlotMap::with_key(),
+            quirks_mode: QuirksMode::NoQuirks,
             geometry_generation: AtomicU64::new(1),
             viewport_scroll: crate::Point::ZERO,
             viewport_size: taffy::Size::ZERO,
         }
+    }
+
+    pub(crate) fn quirks_mode(&self) -> QuirksMode {
+        self.quirks_mode
+    }
+
+    pub(crate) fn set_quirks_mode(&mut self, quirks_mode: QuirksMode) {
+        self.quirks_mode = quirks_mode;
     }
 
     pub fn viewport_scroll(&self) -> crate::Point<f64> {

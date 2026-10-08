@@ -16,7 +16,7 @@ use crate::url::DocumentUrl;
 use crate::util::ImageType;
 use crate::{
     DEFAULT_CSS, DocumentConfig, DocumentMutator, DummyHtmlParserProvider, ElementData,
-    EventDriver, HtmlParserProvider, Node, NodeData, NoopEventHandler, StyleThreading,
+    EventDriver, HtmlParserProvider, Node, NodeData, NoopEventHandler, QuirksMode, StyleThreading,
     TextNodeData,
 };
 use blitz_traits::devtools::DevtoolSettings;
@@ -29,7 +29,7 @@ use cursor_icon::CursorIcon;
 use linebender_resource_handle::Blob;
 use markup5ever::{LocalName, local_name};
 use parley::{FontContext, PlainEditorDriver};
-use selectors::{Element, matching::QuirksMode};
+use selectors::Element;
 use smallvec::SmallVec;
 use std::any::Any;
 use std::cell::RefCell;
@@ -78,6 +78,31 @@ pub enum DocGuard<'a> {
     RefCell(std::cell::Ref<'a, BaseDocument>),
     RwLock(RwLockReadGuard<'a, BaseDocument>),
     Mutex(MutexGuard<'a, BaseDocument>),
+}
+
+#[cfg(test)]
+mod document_mode_tests {
+    use super::*;
+
+    #[test]
+    fn document_mode_survives_device_rebuilds() {
+        let mut doc = BaseDocument::new(DocumentConfig::default());
+        for mode in [
+            QuirksMode::Quirks,
+            QuirksMode::LimitedQuirks,
+            QuirksMode::NoQuirks,
+        ] {
+            doc.set_quirks_mode(mode);
+            doc.flush_pending_device_changes();
+            assert_eq!(doc.stylist.device().quirks_mode(), mode);
+            doc.set_media_type(MediaType::print());
+            doc.flush_pending_device_changes();
+            assert_eq!(doc.stylist.device().quirks_mode(), mode);
+            doc.set_media_type(MediaType::screen());
+            doc.flush_pending_device_changes();
+            assert_eq!(doc.stylist.device().quirks_mode(), mode);
+        }
+    }
 }
 
 impl Deref for DocGuard<'_> {
@@ -408,7 +433,12 @@ impl BaseDocument {
 
         let viewport = config.viewport.unwrap_or_default();
         let media_type = config.media_type.unwrap_or_else(MediaType::screen);
-        let device = make_device(&viewport, media_type.clone(), font_ctx.clone());
+        let device = make_device(
+            &viewport,
+            media_type.clone(),
+            QuirksMode::NoQuirks,
+            font_ctx.clone(),
+        );
         let stylist = Stylist::new(device, QuirksMode::NoQuirks);
         let snapshots = SnapshotMap::new();
         let mut nodes = Box::new(NodeTree::new());
@@ -2096,6 +2126,40 @@ impl BaseDocument {
         &self.media_type
     }
 
+    /// Returns the document's HTML/CSS compatibility mode.
+    ///
+    /// Full-document HTML parsing sets this from its parsed doctype. Fragment
+    /// insertion leaves the containing document's mode unchanged. This carries
+    /// Stylo's mode through matching and cascade; it does not claim support for
+    /// every legacy CSS parsing behavior.
+    pub fn quirks_mode(&self) -> QuirksMode {
+        self.nodes.quirks_mode()
+    }
+
+    /// Sets the document's HTML/CSS compatibility mode and schedules a device
+    /// rebuild and full recascade. Callers that change it after initial styling must resolve the
+    /// document before reading layout or computed styles. Full-document parsers
+    /// own any mode-specific UA stylesheet additions or removals.
+    pub fn set_quirks_mode(&mut self, quirks_mode: QuirksMode) {
+        if self.quirks_mode() == quirks_mode {
+            return;
+        }
+        self.nodes.set_quirks_mode(quirks_mode);
+        self.stylist.set_quirks_mode(quirks_mode);
+        self.queue_device_changes(DeviceChanges::QUIRKS_MODE);
+        // Document mode can change selector matching and UA sizing without a
+        // DOM mutation. Cached intrinsic and inline measurements must not
+        // survive that recascade, even where the computed style happens to be
+        // identical.
+        for (_, node) in self.nodes.iter_mut() {
+            node.invalidate_layout_cache();
+            node.insert_damage(ALL_DAMAGE);
+        }
+        if let Some(root_id) = self.try_root_element().map(|root| root.id) {
+            self.nodes[root_id].set_restyle_hint(RestyleHint::recascade_subtree());
+        }
+    }
+
     /// Sets the CSS media type used to evaluate `@media` rules (e.g. `screen` or `print`)
     /// and queues a stylist device rebuild so updated rules apply on the next restyle.
     pub fn set_media_type(&mut self, media_type: MediaType) {
@@ -2206,6 +2270,7 @@ impl BaseDocument {
         self.set_stylist_device(make_device(
             &self.viewport,
             self.media_type.clone(),
+            self.quirks_mode(),
             self.font_ctx.clone(),
         ));
         self.scroll_viewport_by(0.0, 0.0); // Clamp scroll offset

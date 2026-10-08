@@ -38,6 +38,8 @@ bitflags! {
         const COLOR_SCHEME = 0b0000_0100;
         /// The media type (e.g. screen/print) changed.
         const MEDIA_TYPE = 0b0000_1000;
+        /// The document's compatibility mode changed.
+        const QUIRKS_MODE = 0b0001_0000;
     }
 }
 
@@ -62,6 +64,7 @@ impl DeviceChanges {
 pub(crate) fn make_device(
     viewport: &Viewport,
     media_type: MediaType,
+    quirks_mode: QuirksMode,
     font_ctx: Arc<Mutex<FontContext>>,
 ) -> Device {
     let (width, height) = viewport.logical_size();
@@ -71,7 +74,7 @@ pub(crate) fn make_device(
 
     Device::new(
         media_type,
-        QuirksMode::NoQuirks,
+        quirks_mode,
         viewport_size,
         device_size,
         device_pixel_ratio,
