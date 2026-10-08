@@ -5,8 +5,8 @@ use std::sync::Arc;
 use color::{AlphaColor, Srgb};
 use markup5ever::{QualName, local_name, ns};
 use parley::{
-    FontContext, InlineBox, InlineBoxKind, LayoutContext, StyleProperty, TreeBuilder,
-    WhiteSpaceCollapse,
+    FontContext, InlineBox, InlineBoxKind, LayoutContext, QuantizationMode, StyleProperty,
+    TreeBuilder, WhiteSpaceCollapse,
 };
 use style::{
     computed_values::position::T as PositionProperty,
@@ -956,6 +956,7 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
         let mut builder =
             doc.layout_ctx
                 .tree_builder(&mut font_ctx, doc.viewport.scale(), true, &style);
+        builder.set_quantization_mode(QuantizationMode::Logical);
         builder.push_text(&text);
 
         let mut layout = builder.build().0;
@@ -985,6 +986,7 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
 
     let editor = &mut text_input_data.editor;
     editor.set_scale(doc.viewport.scale_f64() as f32);
+    editor.set_quantization_mode(QuantizationMode::Logical);
     editor.set_width(None);
 
     let styles = editor.edit_styles();
@@ -1163,6 +1165,7 @@ pub(crate) fn build_inline_layout_into(
 
     // Create a parley tree builder
     let mut builder = layout_ctx.tree_builder(font_ctx, scale, true, &parley_style);
+    builder.set_quantization_mode(QuantizationMode::Logical);
     // Line break opportunities as Chromium has them (no break inside "1/2",
     // a break after the hyphen in "1999-12-31", ...).
     builder.set_line_break_override(Some(parley::CHROMIUM_LINE_BREAK_OVERRIDE));

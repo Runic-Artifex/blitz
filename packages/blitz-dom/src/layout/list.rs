@@ -1,6 +1,6 @@
 use blitz_traits::node_id::NodeId;
 use markup5ever::local_name;
-use parley::FontFamily;
+use parley::{FontFamily, QuantizationMode};
 use style::computed_values::list_style_type::T as ListStyleType;
 use style::{
     computed_values::list_style_position::T as ListStylePosition, counter_style::CounterStyle,
@@ -92,6 +92,7 @@ fn node_list_item_child(
                 true,
                 &parley_style,
             );
+            builder.set_quantization_mode(QuantizationMode::Logical);
 
             match &marker {
                 Marker::Char(char) => {
