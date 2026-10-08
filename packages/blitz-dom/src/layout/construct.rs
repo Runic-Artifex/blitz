@@ -1202,6 +1202,7 @@ pub(crate) fn build_inline_layout_into(
     // Create a parley tree builder
     let mut builder = layout_ctx.tree_builder(font_ctx, scale, true, &parley_style);
     builder.set_quantization_mode(QuantizationMode::Logical);
+    builder.set_empty_span_participation(nodes.quirks_mode() == crate::QuirksMode::NoQuirks);
     // Line break opportunities as Chromium has them (no break inside "1/2",
     // a break after the hyphen in "1999-12-31", ...).
     builder.set_line_break_override(Some(parley::CHROMIUM_LINE_BREAK_OVERRIDE));

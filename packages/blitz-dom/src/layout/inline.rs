@@ -296,6 +296,9 @@ impl BaseDocument {
             && inline_layout.text.is_empty()
             && inline_layout.layout.inline_boxes().len() == 0
         {
+            // Empty ordinary spans still have observable zero-width fragments, even when the
+            // formatting context collapses through and contributes no block height.
+            inline_layout.layout.break_all_lines(Some(0.));
             // Put layout back
             self.nodes[node_id]
                 .data
@@ -303,7 +306,9 @@ impl BaseDocument {
                 .unwrap()
                 .inline_layout_data = Some(retained_layout.unwrap_or(inline_layout));
             return LayoutOutput::from_outer_size(
-                Size::ZERO.maybe_max(container_pb.sum_axes().map(Some)),
+                Size::ZERO
+                    .maybe_max(node_size)
+                    .maybe_max(container_pb.sum_axes().map(Some)),
             );
         }
 

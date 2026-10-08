@@ -2507,7 +2507,13 @@ impl BaseDocument {
     /// remains available for positioning and containing-block constraints.
     pub fn get_transformed_client_bounding_rect(&self, node: NodeId) -> Option<BoundingRect> {
         let mut r = self.get_client_bounding_rect(node)?;
-        if r.width == 0.0 && r.height == 0.0 && !self.get_node(node)?.has_boxes() {
+        if r.width == 0.0
+            && r.height == 0.0
+            && (!self.get_node(node)?.has_boxes()
+                || self
+                    .inline_fragment_rects(node)
+                    .is_some_and(|rects| rects.is_empty()))
+        {
             return Some(r);
         }
         // CSS transforms of the node and its ancestors: the bounding box of the
@@ -2693,6 +2699,9 @@ impl BaseDocument {
     /// return a single rect. Non-atomic inline elements (which are laid out as style
     /// spans within an inline root's text layout) return one rect per line box.
     pub fn node_client_rects(&self, node_id: NodeId) -> Vec<BoundingRect> {
+        if self.get_node(node_id).is_none_or(|node| !node.has_boxes()) {
+            return Vec::new();
+        }
         match self.inline_fragment_rects(node_id) {
             Some(rects) => rects,
             None => self.get_client_bounding_rect(node_id).into_iter().collect(),
@@ -2757,8 +2766,13 @@ impl BaseDocument {
         for line in layout.lines() {
             // An inline element's content area uses its own first available
             // font, not the line-height box or the extents of taller children.
-            let (content_top, content_bottom) =
-                inline_layout.span_block_bounds(line, node, inline_root)?;
+            let Some((content_top, content_bottom)) =
+                inline_layout.span_block_bounds(line, node, inline_root)
+            else {
+                // This is still a flattened inline, even when its style generated no
+                // participant (for example an empty span under the legacy policy).
+                continue;
+            };
             // Union all of the target's fragments on this line into a single rect
             let mut line_rect: Option<(f64, f64, f64, f64)> = None;
             let mut add = |x0: f64, y0: f64, x1: f64, y1: f64| {
@@ -2769,6 +2783,17 @@ impl BaseDocument {
                     None => (x0, y0, x1, y1),
                 });
             };
+
+            for (style, offset) in line.empty_spans() {
+                if is_in_target(layout.styles()[style].brush.id) {
+                    add(
+                        offset as f64,
+                        content_top as f64,
+                        offset as f64,
+                        content_bottom as f64,
+                    );
+                }
+            }
 
             for item in line.items() {
                 match item {
@@ -3849,5 +3874,100 @@ mod disabled_focus_tests {
             assert_eq!(doc.get_focussed_node_id(), Some(disabled));
             assert!(!doc.nodes[enabled].is_focussed());
         }
+    }
+}
+
+#[cfg(test)]
+mod empty_inline_cssom_geometry_tests {
+    use super::*;
+    use crate::{Attribute, qual_name};
+    use blitz_traits::shell::ColorScheme;
+
+    fn attr(value: &str) -> Attribute {
+        Attribute {
+            name: qual_name!("style"),
+            value: value.into(),
+        }
+    }
+
+    fn document_with_span(parent_style: &str, span_style: &str) -> (BaseDocument, NodeId) {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root = doc.root_node().id;
+        let mut mutator = doc.mutate();
+        // BaseDocument has no HTML UA stylesheet in this unit test, so make the
+        // block formatting context explicit rather than relying on tag defaults.
+        let html = mutator.create_element(qual_name!("html"), vec![attr("display:block")]);
+        let body = mutator.create_element(qual_name!("body"), vec![attr("display:block;margin:0")]);
+        let parent = mutator.create_element(
+            qual_name!("div"),
+            vec![attr(&format!("display:block;{parent_style}"))],
+        );
+        let span = mutator.create_element(qual_name!("span"), vec![attr(span_style)]);
+        mutator.append_children(parent, &[span]);
+        mutator.append_children(body, &[parent]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+        (doc, span)
+    }
+
+    fn assert_zero_rect(rect: Option<BoundingRect>) {
+        assert_eq!(
+            rect,
+            Some(BoundingRect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            })
+        );
+    }
+
+    #[test]
+    fn standards_empty_inline_has_a_zero_width_fragment() {
+        let (doc, span) = document_with_span("", "");
+        let rects = doc.node_client_rects(span);
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].width, 0.0);
+        assert_eq!(doc.get_client_bounding_rect(span), Some(rects[0]));
+    }
+
+    #[test]
+    fn standards_empty_inline_fragment_is_transformed_with_its_parent() {
+        let (doc, span) = document_with_span("transform:translate(50px,30px)", "");
+        let rect = doc.get_client_bounding_rect(span).unwrap();
+        let transformed = doc.get_transformed_client_bounding_rect(span).unwrap();
+        assert_eq!(transformed.x, rect.x + 50.0);
+        assert_eq!(transformed.y, rect.y + 30.0);
+        assert_eq!(transformed.width, rect.width);
+        assert_eq!(transformed.height, rect.height);
+    }
+
+    #[test]
+    fn quirks_empty_inline_empty_list_has_an_untransformed_cssom_zero_rect() {
+        let (mut doc, span) = document_with_span("transform:translate(50px,30px)", "");
+        doc.set_quirks_mode(QuirksMode::Quirks);
+        doc.resolve(0.0);
+        let fragments = doc.inline_fragment_rects(span);
+        assert!(
+            fragments.as_ref().is_some_and(|rects| rects.is_empty()),
+            "quirks empty span fragments: {fragments:?}"
+        );
+        assert!(doc.node_client_rects(span).is_empty());
+        assert_zero_rect(doc.get_client_bounding_rect(span));
+        assert_zero_rect(doc.get_transformed_client_bounding_rect(span));
+    }
+
+    #[test]
+    fn display_contents_has_empty_client_rects_and_cssom_zero_bounding_rect() {
+        let (doc, span) = document_with_span("", "display:contents");
+        assert!(!doc.get_node(span).unwrap().has_boxes());
+        assert!(doc.node_client_rects(span).is_empty());
+        assert_zero_rect(doc.get_client_bounding_rect(span));
+        assert_zero_rect(doc.get_transformed_client_bounding_rect(span));
     }
 }
