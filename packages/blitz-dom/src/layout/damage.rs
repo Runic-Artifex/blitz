@@ -327,6 +327,18 @@ pub(crate) fn compute_layout_damage(old: &ComputedValues, new: &ComputedValues) 
     };
 
     let text_shaping_needs_recollect = || {
+        // Used spacing may change without reshaping, but crossing a box-side
+        // shaping seam must recollect the paragraph. Alignment-only changes
+        // retain their separate cached-shaping policy.
+        if new.get_box().display.outside() == DisplayOutside::Inline
+            && new.get_box().display.inside() == DisplayInside::Flow
+            && !matches!(new.get_box().position, Position::Absolute | Position::Fixed)
+            && crate::stylo_to_parley::inline_span_box_shaping_boundaries(old)
+                != crate::stylo_to_parley::inline_span_box_shaping_boundaries(new)
+        {
+            return true;
+        }
+
         if old.clone_direction() != new.clone_direction()
             || old.clone_unicode_bidi() != new.clone_unicode_bidi()
         {
@@ -603,6 +615,139 @@ mod tests {
                 RestyleDamage::RELAYOUT
             );
         }
+    }
+
+    #[test]
+    fn inline_box_seam_changes_recollect_and_reset() {
+        use style::values::computed::Display;
+        use style::values::generics::length::GenericMargin;
+
+        let mut initial = initial_style();
+        initial.mutate_box().set_display(Display::Inline);
+        let with_margin = |left, right| {
+            let mut style = initial.clone();
+            style
+                .mutate_margin()
+                .set_margin_left(GenericMargin::LengthPercentage(
+                    LengthPercentage::new_length(Length::new(left)),
+                ));
+            style
+                .mutate_margin()
+                .set_margin_right(GenericMargin::LengthPercentage(
+                    LengthPercentage::new_length(Length::new(right)),
+                ));
+            style
+        };
+        let start = with_margin(3.0, 0.0);
+        let negative_start = with_margin(-3.0, 0.0);
+        let end = with_margin(0.0, 3.0);
+        let larger_end = with_margin(0.0, 6.0);
+        for (old, new) in [
+            (&initial, &start),
+            (&start, &initial),
+            (&start, &end),
+            (&end, &start),
+        ] {
+            assert_eq!(compute_layout_damage(old, new), ALL_DAMAGE);
+        }
+        for (old, new) in [(&start, &negative_start), (&end, &larger_end)] {
+            assert_eq!(compute_layout_damage(old, new), RestyleDamage::RELAYOUT);
+        }
+
+        let mut padded = initial.clone();
+        padded
+            .mutate_padding()
+            .set_padding_right(NonNegative(LengthPercentage::new_length(Length::new(3.0))));
+        for (old, new) in [(&initial, &padded), (&padded, &initial)] {
+            assert_eq!(compute_layout_damage(old, new), ALL_DAMAGE);
+        }
+        let mut canceled = padded.clone();
+        canceled
+            .mutate_margin()
+            .set_margin_right(GenericMargin::LengthPercentage(
+                LengthPercentage::new_length(Length::new(-3.0)),
+            ));
+        assert_eq!(
+            compute_layout_damage(&padded, &canceled),
+            RestyleDamage::RELAYOUT
+        );
+        assert_eq!(compute_layout_damage(&initial, &canceled), ALL_DAMAGE);
+    }
+
+    #[test]
+    fn effective_inline_border_seams_recollect() {
+        use style::values::computed::{BorderSideWidth, BorderStyle, Display};
+
+        let mut initial = initial_style();
+        initial.mutate_box().set_display(Display::Inline);
+        initial
+            .mutate_border()
+            .set_border_left_width(BorderSideWidth(app_units::Au::from_px(2)));
+        let mut hidden = initial.clone();
+        hidden
+            .mutate_border()
+            .set_border_left_style(BorderStyle::Hidden);
+        let mut solid = initial.clone();
+        solid
+            .mutate_border()
+            .set_border_left_style(BorderStyle::Solid);
+        let mut larger = solid.clone();
+        larger
+            .mutate_border()
+            .set_border_left_width(BorderSideWidth(app_units::Au::from_px(4)));
+        let mut zero = solid.clone();
+        zero.mutate_border()
+            .set_border_left_width(BorderSideWidth(app_units::Au::from_px(0)));
+        for (old, new) in [
+            (&hidden, &solid),
+            (&solid, &hidden),
+            (&solid, &zero),
+            (&zero, &solid),
+        ] {
+            assert_eq!(compute_layout_damage(old, new), ALL_DAMAGE);
+        }
+        assert_eq!(
+            compute_layout_damage(&initial, &hidden),
+            RestyleDamage::RELAYOUT
+        );
+        assert_eq!(
+            compute_layout_damage(&solid, &larger),
+            RestyleDamage::RELAYOUT
+        );
+    }
+
+    #[test]
+    fn non_inline_flow_box_edges_do_not_recollect_text() {
+        use style::values::computed::Display;
+        use style::values::generics::length::GenericMargin;
+
+        for display in [Display::Block, Display::InlineBlock, Display::TableCell] {
+            let mut initial = initial_style();
+            initial.mutate_box().set_display(display);
+            let mut changed = initial.clone();
+            changed
+                .mutate_margin()
+                .set_margin_left(GenericMargin::LengthPercentage(
+                    LengthPercentage::new_length(Length::new(3.0)),
+                ));
+            assert_eq!(
+                compute_layout_damage(&initial, &changed),
+                RestyleDamage::RELAYOUT
+            );
+        }
+        let mut initial = initial_style();
+        initial.mutate_box().set_display(Display::Inline);
+        initial.mutate_box().set_position(Position::Absolute);
+        let mut changed = initial.clone();
+        changed
+            .mutate_margin()
+            .set_margin_left(GenericMargin::LengthPercentage(
+                LengthPercentage::new_length(Length::new(3.0)),
+            ));
+        assert_eq!(
+            compute_layout_damage(&initial, &changed),
+            RestyleDamage::RELAYOUT
+        );
     }
 
     #[test]

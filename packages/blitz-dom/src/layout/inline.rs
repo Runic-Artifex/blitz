@@ -212,7 +212,8 @@ impl BaseDocument {
             (inputs.run_mode == RunMode::ComputeSize).then(|| inline_layout.clone());
 
         // Vertical alignment changes line geometry without invalidating cached
-        // shaping. Boundary intent is applied only when the paragraph is rebuilt.
+        // shaping. Alignment boundary intent applies on paragraph rebuild;
+        // box-side intent transitions independently request recollection.
         let alignments: Vec<_> = inline_layout
             .layout
             .styles()

@@ -349,10 +349,6 @@ pub(crate) fn white_space_collapse(input: stylo::WhiteSpaceCollapse) -> parley::
 /// Explicit vertical alignment requests both, even for a zero shift. The caller gates this
 /// to standards mode. Each side follows Blink's ShouldBreakShapingBefore/AfterBox policy.
 pub(crate) fn inline_span_shaping_boundaries(style: &stylo::ComputedValues) -> (bool, bool) {
-    use style::logical_geometry::PhysicalSide;
-    use style::values::computed::length_percentage::Unpacked;
-    use style::values::generics::length::GenericMargin;
-
     let aligned = style.clone_alignment_baseline() != stylo::AlignmentBaseline::Baseline
         || !matches!(
             style.clone_baseline_shift(),
@@ -361,6 +357,14 @@ pub(crate) fn inline_span_shaping_boundaries(style: &stylo::ComputedValues) -> (
     if aligned {
         return (true, true);
     }
+    inline_span_box_shaping_boundaries(style)
+}
+
+/// Box-side shaping intent, independent of vertical alignment's layout refresh policy.
+pub(crate) fn inline_span_box_shaping_boundaries(style: &stylo::ComputedValues) -> (bool, bool) {
+    use style::logical_geometry::PhysicalSide;
+    use style::values::computed::length_percentage::Unpacked;
+    use style::values::generics::length::GenericMargin;
 
     let nonzero = |value: &style::values::computed::LengthPercentage| match value.unpack() {
         Unpacked::Length(length) => length.px() != 0.0,
