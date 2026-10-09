@@ -448,20 +448,17 @@ fn collect_layout_children_with_wrap(
         // Handle text inputs
         let tag_name = el.name.local.as_ref();
         if matches!(tag_name, "input" | "textarea") {
-            let type_attr: Option<&str> = doc.nodes[container_node_id]
-                .data
-                .downcast_element()
-                .and_then(|el| el.attr(local_name!("type")));
+            let input_type = el.effective_input_type();
             if tag_name == "textarea" {
                 create_text_editor(doc, container_node_id, true);
                 return;
             } else if matches!(
-                type_attr,
-                None | Some("text" | "password" | "email" | "number" | "search" | "tel" | "url")
+                input_type,
+                "text" | "password" | "email" | "number" | "search" | "tel" | "url"
             ) {
                 create_text_editor(doc, container_node_id, false);
                 return;
-            } else if matches!(type_attr, Some("checkbox" | "radio")) {
+            } else if matches!(input_type, "checkbox" | "radio") {
                 create_checkbox_input(doc, container_node_id);
                 return;
             }
@@ -1112,7 +1109,7 @@ pub(crate) fn find_inline_layout_embedded_boxes(
             NodeData::Element(element_data) | NodeData::AnonymousBlock(element_data) => {
                 // if the input type is hidden, hide it
                 if *element_data.name.local == *"input" {
-                    if let Some("hidden") = element_data.attr(local_name!("type")) {
+                    if element_data.effective_input_type() == "hidden" {
                         return;
                     }
                 }
@@ -1278,7 +1275,7 @@ pub(crate) fn build_inline_layout_into(
             NodeData::Element(element_data) | NodeData::AnonymousBlock(element_data) => {
                 // if the input type is hidden, hide it
                 if *element_data.name.local == *"input" {
-                    if let Some("hidden") = element_data.attr(local_name!("type")) {
+                    if element_data.effective_input_type() == "hidden" {
                         return;
                     }
                 }

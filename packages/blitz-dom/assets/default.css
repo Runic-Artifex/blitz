@@ -92,7 +92,26 @@ input[type="radio" i] {
     margin: 3px 3px 0 5px;
 }
 
-input:not([type]),
+/* Missing and invalid type keywords are text fields. Keep the same attribute
+ * selector specificity while excluding every known non-text input state. */
+input:not(
+    [type="hidden" i],
+    [type="date" i],
+    [type="month" i],
+    [type="week" i],
+    [type="time" i],
+    [type="datetime-local" i],
+    [type="number" i],
+    [type="range" i],
+    [type="color" i],
+    [type="checkbox" i],
+    [type="radio" i],
+    [type="file" i],
+    [type="submit" i],
+    [type="image" i],
+    [type="reset" i],
+    [type="button" i]
+),
 input[type="text" i],
 input[type="password" i],
 input[type="email" i],

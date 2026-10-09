@@ -437,10 +437,7 @@ impl ElementData {
         // Mirror the `checked` attribute into the element state so that `:checked`
         // selectors can be matched (and invalidated) from `ElementState`.
         if data.name.local == local_name!("input")
-            && matches!(
-                data.attr(local_name!("type")),
-                Some("checkbox") | Some("radio")
-            )
+            && matches!(data.effective_input_type(), "checkbox" | "radio")
             && data.has_attr(local_name!("checked"))
         {
             data.element_state.insert(ElementState::CHECKED);
@@ -465,6 +462,40 @@ impl ElementData {
     pub fn attr(&self, name: impl PartialEq<LocalName>) -> Option<&str> {
         let attr = self.attrs.iter().find(|attr| name == attr.name.local)?;
         Some(&attr.value)
+    }
+
+    /// The input type state, without changing the authored attribute.
+    /// Missing and invalid keywords use HTML's Text state default.
+    pub(crate) fn effective_input_type(&self) -> &'static str {
+        const TYPES: [&str; 22] = [
+            "hidden",
+            "text",
+            "search",
+            "tel",
+            "url",
+            "email",
+            "password",
+            "date",
+            "month",
+            "week",
+            "time",
+            "datetime-local",
+            "number",
+            "range",
+            "color",
+            "checkbox",
+            "radio",
+            "file",
+            "submit",
+            "image",
+            "reset",
+            "button",
+        ];
+        let authored = self.attr(local_name!("type")).unwrap_or("");
+        TYPES
+            .into_iter()
+            .find(|keyword| authored.eq_ignore_ascii_case(keyword))
+            .unwrap_or("text")
     }
 
     pub fn attr_parsed<T: FromStr>(&self, name: impl PartialEq<LocalName>) -> Option<T> {

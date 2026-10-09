@@ -380,12 +380,12 @@ impl BaseDocument {
                 }
 
                 if *element_data.name.local == *"input" {
-                    match element_data.attr(local_name!("type")) {
+                    match element_data.effective_input_type() {
                         // if the input type is hidden, hide it
-                        Some("hidden") => {
+                        "hidden" => {
                             return taffy::LayoutOutput::HIDDEN;
                         }
-                        Some("checkbox" | "radio") => {
+                        "checkbox" | "radio" => {
                             // Native checkable controls use the author width and
                             // height as their outer widget box. As permitted by
                             // CSS UI, their native appearance disregards author
@@ -425,7 +425,7 @@ impl BaseDocument {
                             }
                             return output;
                         }
-                        None | Some("text" | "password" | "email" | "tel" | "url" | "search") => {
+                        "text" | "password" | "email" | "tel" | "url" | "search" => {
                             // Blink sizes text controls from the primary
                             // font's OS/2 average width (or the `0`
                             // glyph fallback), not from `ch`. The intrinsic
