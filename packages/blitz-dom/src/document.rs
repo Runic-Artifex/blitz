@@ -2734,6 +2734,8 @@ impl BaseDocument {
         let inline_layout = inline_root.element_data()?.inline_layout_data.as_ref()?;
         let layout = &inline_layout.layout;
         let scale = layout.scale() as f64;
+        let standards_mode = self.quirks_mode() == QuirksMode::NoQuirks;
+        let target_style = inline_layout.style_index(node_id);
 
         // Walk up the DOM parent chain from `id` to check whether it is (or is
         // inside) the target node, stopping at the inline root.
@@ -2773,6 +2775,23 @@ impl BaseDocument {
                 // participant (for example an empty span under the legacy policy).
                 continue;
             };
+            if standards_mode {
+                // Tracked ownership includes full shaping atoms and real zero-width
+                // continuations. Absence on this line must not fall back to brush
+                // runs or DOM unions, which can assign part of an atom to this span.
+                if let Some((x0, x1)) = target_style.and_then(|style| line.style_span_bounds(style))
+                {
+                    rects.push(BoundingRect {
+                        x: snap_to_layout_unit(origin_x + f64::from(x0) / scale),
+                        y: snap_to_layout_unit(origin_y + f64::from(content_top) / scale),
+                        width: snap_to_layout_unit(f64::from(x1 - x0) / scale),
+                        height: snap_to_layout_unit(
+                            f64::from(content_bottom - content_top) / scale,
+                        ),
+                    });
+                }
+                continue;
+            }
             // Union all of the target's fragments on this line into a single rect
             let mut line_rect: Option<(f64, f64, f64, f64)> = None;
             let mut add = |x0: f64, y0: f64, x1: f64, y1: f64| {
@@ -3969,5 +3988,125 @@ mod empty_inline_cssom_geometry_tests {
         assert!(doc.node_client_rects(span).is_empty());
         assert_zero_rect(doc.get_client_bounding_rect(span));
         assert_zero_rect(doc.get_transformed_client_bounding_rect(span));
+    }
+}
+
+#[cfg(all(test, feature = "woff"))]
+mod ordinary_span_ownership_cssom_tests {
+    use super::*;
+    use crate::{Attribute, qual_name};
+    use blitz_traits::shell::ColorScheme;
+
+    fn attr(value: &str) -> Attribute {
+        Attribute {
+            name: qual_name!("style"),
+            value: value.into(),
+        }
+    }
+
+    fn document_with_atom(
+        before: &str,
+        inside: &str,
+        after: &str,
+    ) -> (BaseDocument, NodeId, NodeId, NodeId) {
+        // Reuse a repository font instead of relying on system fonts. Its default
+        // fi ligature and composed accents make the ownership reductions real atoms.
+        let font_ctx = crate::build_single_font_ctx(include_bytes!(
+            "../../../examples/wasm_hello/assets/DejaVuSans.woff2"
+        ));
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            font_ctx: Some(font_ctx),
+            ..Default::default()
+        });
+        let root = doc.root_node().id;
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![attr("display:block")]);
+        let body = mutator.create_element(qual_name!("body"), vec![attr("display:block;margin:0")]);
+        let parent = mutator.create_element(
+            qual_name!("div"),
+            vec![attr("display:block;width:200px;font:16px/20px sans-serif")],
+        );
+        let outer = mutator.create_element(qual_name!("span"), vec![]);
+        let inner = mutator.create_element(qual_name!("span"), vec![]);
+        let before = mutator.create_text_node(before);
+        let inside = mutator.create_text_node(inside);
+        let after = mutator.create_text_node(after);
+        mutator.append_children(inner, &[inside]);
+        mutator.append_children(outer, &[before, inner, after]);
+        mutator.append_children(parent, &[outer]);
+        mutator.append_children(body, &[parent]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+        (doc, parent, outer, inner)
+    }
+
+    fn assert_single_glyph(doc: &BaseDocument, parent: NodeId) {
+        let layout = &doc
+            .get_node(parent)
+            .unwrap()
+            .element_data()
+            .unwrap()
+            .inline_layout_data
+            .as_ref()
+            .unwrap()
+            .layout;
+        let glyphs: usize = layout
+            .lines()
+            .flat_map(|line| line.items())
+            .map(|item| match item {
+                parley::PositionedLayoutItem::GlyphRun(run) => run.positioned_glyphs().count(),
+                parley::PositionedLayoutItem::InlineBox(_) => 0,
+            })
+            .sum();
+        assert_eq!(glyphs, 1, "the reduction must retain one shaped glyph");
+    }
+
+    fn one_rect(doc: &BaseDocument, span: NodeId) -> BoundingRect {
+        let rects = doc.node_client_rects(span);
+        assert_eq!(
+            rects.len(),
+            1,
+            "a zero continuation is still a real fragment"
+        );
+        assert_eq!(doc.get_client_bounding_rect(span), Some(rects[0]));
+        rects[0]
+    }
+
+    #[test]
+    fn nested_ligature_continuation_has_a_real_zero_width_fragment() {
+        let (doc, parent, outer, inner) = document_with_atom("f", "i", "");
+        assert_single_glyph(&doc, parent);
+        let whole = one_rect(&doc, outer);
+        let continuation = one_rect(&doc, inner);
+        assert!(whole.width > 0.0);
+        assert_eq!(continuation.width, 0.0);
+        assert_eq!(continuation.x, whole.x + whole.width);
+        assert_eq!(continuation.y, whole.y);
+        assert_eq!(continuation.height, whole.height);
+    }
+
+    #[test]
+    fn combining_continuation_retains_the_atom_end_fragment() {
+        let (doc, parent, outer, inner) = document_with_atom("a", "\u{301}", "");
+        assert_single_glyph(&doc, parent);
+        let whole = one_rect(&doc, outer);
+        let continuation = one_rect(&doc, inner);
+        assert!(whole.width > 0.0);
+        assert_eq!(continuation.width, 0.0);
+        assert_eq!(continuation.x, whole.x + whole.width);
+        assert_eq!(continuation.height, whole.height);
+    }
+
+    #[test]
+    fn span_closing_inside_a_ligature_owns_the_whole_atom() {
+        let (doc, parent, outer, inner) = document_with_atom("", "f", "i");
+        assert_single_glyph(&doc, parent);
+        let whole = one_rect(&doc, outer);
+        let owner = one_rect(&doc, inner);
+        assert!(whole.width > 0.0);
+        assert_eq!(owner, whole);
     }
 }
