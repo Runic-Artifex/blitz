@@ -721,7 +721,7 @@ mod tests {
         use style::values::computed::Display;
         use style::values::generics::length::GenericMargin;
 
-        for display in [Display::Block, Display::InlineBlock, Display::TableCell] {
+        for display in [Display::Block, Display::InlineBlock] {
             let mut initial = initial_style();
             initial.mutate_box().set_display(display);
             let mut changed = initial.clone();
@@ -735,6 +735,18 @@ mod tests {
                 RestyleDamage::RELAYOUT
             );
         }
+        // Table cells already reconstruct their snapshot for margin changes;
+        // they never enter the new ordinary-inline seam classification.
+        let mut cell = initial_style();
+        cell.mutate_box().set_display(Display::TableCell);
+        let mut changed_cell = cell.clone();
+        changed_cell
+            .mutate_margin()
+            .set_margin_left(GenericMargin::LengthPercentage(
+                LengthPercentage::new_length(Length::new(3.0)),
+            ));
+        assert_eq!(compute_layout_damage(&cell, &changed_cell), ALL_DAMAGE);
+
         let mut initial = initial_style();
         initial.mutate_box().set_display(Display::Inline);
         initial.mutate_box().set_position(Position::Absolute);
