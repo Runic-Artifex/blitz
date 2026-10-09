@@ -345,16 +345,28 @@ pub(crate) fn white_space_collapse(input: stylo::WhiteSpaceCollapse) -> parley::
     }
 }
 
-/// Shaping boundaries at the owner's inline start and end, before resolving box advances.
-/// Explicit vertical alignment requests both, even for a zero shift. The caller gates this
-/// to standards mode. Each side follows Blink's ShouldBreakShapingBefore/AfterBox policy.
-pub(crate) fn inline_span_shaping_boundaries(style: &stylo::ComputedValues) -> (bool, bool) {
-    let aligned = style.clone_alignment_baseline() != stylo::AlignmentBaseline::Baseline
+/// Ordinary inline boxes with explicit vertical alignment request shaping boundaries,
+/// even when their geometric shift is zero. The caller gates this to standards mode.
+pub(crate) fn inline_span_needs_shaping_boundaries(style: &stylo::ComputedValues) -> bool {
+    style.clone_alignment_baseline() != stylo::AlignmentBaseline::Baseline
         || !matches!(
             style.clone_baseline_shift(),
             stylo::BaselineShift::ImplicitZero
-        );
-    if aligned {
+        )
+}
+
+/// Computed shaping intent at each owner side, independent of resolved box advances.
+///
+/// This is an unactivated prerequisite for ordinary inline box spacing. Activating it
+/// alone changes atom ownership and paint while the used advances are still missing.
+/// Construction therefore retains the alignment-only predicate above until placement,
+/// ownership, hits and editing can consume used edges together.
+#[allow(
+    dead_code,
+    reason = "requires integrated ordinary-inline used-edge placement"
+)]
+pub(crate) fn inline_span_shaping_boundaries(style: &stylo::ComputedValues) -> (bool, bool) {
+    if inline_span_needs_shaping_boundaries(style) {
         return (true, true);
     }
     inline_span_box_shaping_boundaries(style)
@@ -645,6 +657,8 @@ mod tests {
                 .mutate_margin()
                 .set_margin_left(GenericMargin::LengthPercentage(length(px)));
             assert_eq!(inline_span_shaping_boundaries(&style), (true, false));
+            // Production construction retains explicit-alignment-only requests.
+            assert!(!inline_span_needs_shaping_boundaries(&style));
             style
                 .mutate_margin()
                 .set_margin_left(GenericMargin::LengthPercentage(length(0.0)));
@@ -818,6 +832,7 @@ mod tests {
             stylo::ComputedValues::initial_values_with_font_override(stylo::Font::initial_values());
         let mut style = (*initial).clone();
         assert_eq!(inline_span_shaping_boundaries(&style), (false, false));
+        assert!(!inline_span_needs_shaping_boundaries(&style));
         assert_eq!(
             vertical_align(&style, None),
             parley::VerticalAlign::BASELINE
@@ -828,6 +843,7 @@ mod tests {
         ] {
             style.mutate_box().set_baseline_shift(shift);
             assert_eq!(inline_span_shaping_boundaries(&style), (true, true));
+            assert!(inline_span_needs_shaping_boundaries(&style));
             assert_eq!(
                 vertical_align(&style, None),
                 parley::VerticalAlign::BASELINE
