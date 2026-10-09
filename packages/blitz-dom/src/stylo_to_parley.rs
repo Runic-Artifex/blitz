@@ -345,14 +345,70 @@ pub(crate) fn white_space_collapse(input: stylo::WhiteSpaceCollapse) -> parley::
     }
 }
 
-/// Ordinary inline boxes with explicit vertical alignment request shaping boundaries,
-/// even when their geometric shift is zero. The caller gates this to standards mode.
-pub(crate) fn inline_span_needs_shaping_boundaries(style: &stylo::ComputedValues) -> bool {
-    style.clone_alignment_baseline() != stylo::AlignmentBaseline::Baseline
+/// Shaping boundaries at the owner's inline start and end, before resolving box advances.
+/// Explicit vertical alignment requests both, even for a zero shift. The caller gates this
+/// to standards mode. Each side follows Blink's ShouldBreakShapingBefore/AfterBox policy.
+pub(crate) fn inline_span_shaping_boundaries(style: &stylo::ComputedValues) -> (bool, bool) {
+    use style::logical_geometry::PhysicalSide;
+    use style::values::computed::length_percentage::Unpacked;
+    use style::values::generics::length::GenericMargin;
+
+    let aligned = style.clone_alignment_baseline() != stylo::AlignmentBaseline::Baseline
         || !matches!(
             style.clone_baseline_shift(),
             stylo::BaselineShift::ImplicitZero
-        )
+        );
+    if aligned {
+        return (true, true);
+    }
+
+    let nonzero = |value: &style::values::computed::LengthPercentage| match value.unpack() {
+        Unpacked::Length(length) => length.px() != 0.0,
+        Unpacked::Percentage(percent) => percent.0 != 0.0,
+        // Calc must break shaping even when its eventual used value is zero.
+        Unpacked::Calc(_) => true,
+    };
+    let margin_boundary = |margin: &style::values::computed::Margin| match margin {
+        // Blink's non-calc Length::IsZero treats auto as zero; Stylo's Zero does not.
+        GenericMargin::Auto => false,
+        GenericMargin::LengthPercentage(value) => nonzero(value),
+        // Preserve unresolved boundary intent; this does not add anchor used positioning.
+        GenericMargin::AnchorSizeFunction(_) | GenericMargin::AnchorContainingCalcFunction(_) => {
+            true
+        }
+    };
+    let border_boundary = |side| {
+        let (width, border_style) = match side {
+            PhysicalSide::Top => (
+                style.clone_border_top_width(),
+                style.clone_border_top_style(),
+            ),
+            PhysicalSide::Right => (
+                style.clone_border_right_width(),
+                style.clone_border_right_style(),
+            ),
+            PhysicalSide::Bottom => (
+                style.clone_border_bottom_width(),
+                style.clone_border_bottom_style(),
+            ),
+            PhysicalSide::Left => (
+                style.clone_border_left_width(),
+                style.clone_border_left_style(),
+            ),
+        };
+        // Stylo retains the computed width for none/hidden, unlike Blink's effective width.
+        !border_style.none_or_hidden() && width.0.to_f32_px() != 0.0
+    };
+    let padding = style.logical_padding();
+    let margin = style.logical_margin();
+    (
+        nonzero(padding.inline_start)
+            || margin_boundary(margin.inline_start)
+            || border_boundary(style.writing_mode.inline_start_physical_side()),
+        nonzero(padding.inline_end)
+            || margin_boundary(margin.inline_end)
+            || border_boundary(style.writing_mode.inline_end_physical_side()),
+    )
 }
 
 /// Map the css-inline-3 `alignment-baseline` and `baseline-shift` longhands (which Stylo
@@ -562,15 +618,202 @@ pub(crate) fn style(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use style::values::computed::{LengthPercentage, Percentage};
+    use style::logical_geometry::WritingMode;
+    use style::values::computed::{BorderSideWidth, BorderStyle, LengthPercentage, Percentage};
+    use style::values::generics::NonNegative;
     use style::values::generics::font::{FeatureTagValue, FontSettings, FontTag};
+    use style::values::generics::length::GenericMargin;
+
+    fn initial_style() -> stylo::ComputedValues {
+        (*stylo::ComputedValues::initial_values_with_font_override(stylo::Font::initial_values()))
+            .clone()
+    }
+
+    fn length(px: f32) -> LengthPercentage {
+        LengthPercentage::new_length(Length::new(px))
+    }
+
+    #[test]
+    fn box_sides_request_independent_boundaries_without_summing() {
+        for px in [3.0, -3.0] {
+            let mut style = initial_style();
+            style
+                .mutate_margin()
+                .set_margin_left(GenericMargin::LengthPercentage(length(px)));
+            assert_eq!(inline_span_shaping_boundaries(&style), (true, false));
+            style
+                .mutate_margin()
+                .set_margin_left(GenericMargin::LengthPercentage(length(0.0)));
+            style
+                .mutate_margin()
+                .set_margin_right(GenericMargin::LengthPercentage(length(px)));
+            assert_eq!(inline_span_shaping_boundaries(&style), (false, true));
+        }
+        let mut style = initial_style();
+        style
+            .mutate_padding()
+            .set_padding_left(NonNegative(length(3.0)));
+        assert_eq!(inline_span_shaping_boundaries(&style), (true, false));
+        style
+            .mutate_margin()
+            .set_margin_left(GenericMargin::LengthPercentage(length(-3.0)));
+        assert_eq!(inline_span_shaping_boundaries(&style), (true, false));
+        style
+            .mutate_padding()
+            .set_padding_right(NonNegative(length(2.0)));
+        assert_eq!(inline_span_shaping_boundaries(&style), (true, true));
+        let mut block_only = initial_style();
+        block_only
+            .mutate_padding()
+            .set_padding_top(NonNegative(length(4.0)));
+        block_only
+            .mutate_margin()
+            .set_margin_bottom(GenericMargin::LengthPercentage(length(-4.0)));
+        assert_eq!(inline_span_shaping_boundaries(&block_only), (false, false));
+    }
+
+    #[test]
+    fn auto_and_exact_zero_preserve_shaping_but_percentage_and_calc_do_not() {
+        use style::typed_om::NumericBaseType;
+        use style::values::computed::calc::CalcPercentageLeaf;
+        use style::values::computed::length_percentage::{CalcNode, ComputedLeaf, Unpacked};
+        use style::values::generics::Optional;
+        use style_traits::values::specified::AllowedNumericType;
+
+        for value in [
+            GenericMargin::Auto,
+            GenericMargin::LengthPercentage(length(0.0)),
+            GenericMargin::LengthPercentage(LengthPercentage::new_percent(Percentage(0.0))),
+        ] {
+            let mut style = initial_style();
+            style.mutate_margin().set_margin_left(value.clone());
+            style.mutate_margin().set_margin_right(value);
+            style
+                .mutate_padding()
+                .set_padding_left(NonNegative(LengthPercentage::new_percent(Percentage(0.0))));
+            assert_eq!(inline_span_shaping_boundaries(&style), (false, false));
+        }
+        for percent in [0.1, -0.1] {
+            let value = LengthPercentage::new_percent(Percentage(percent));
+            assert_eq!(value.resolve(Length::new(0.0)).px(), 0.0);
+            let mut style = initial_style();
+            style
+                .mutate_margin()
+                .set_margin_right(GenericMargin::LengthPercentage(value));
+            assert_eq!(inline_span_shaping_boundaries(&style), (false, true));
+        }
+        let mut percentage_padding = initial_style();
+        percentage_padding
+            .mutate_padding()
+            .set_padding_left(NonNegative(LengthPercentage::new_percent(Percentage(0.1))));
+        assert_eq!(
+            inline_span_shaping_boundaries(&percentage_padding),
+            (true, false)
+        );
+        percentage_padding
+            .mutate_padding()
+            .set_padding_left(NonNegative(length(0.0)));
+        percentage_padding
+            .mutate_padding()
+            .set_padding_right(NonNegative(LengthPercentage::new_percent(Percentage(0.1))));
+        assert_eq!(
+            inline_span_shaping_boundaries(&percentage_padding),
+            (false, true)
+        );
+        let calc = LengthPercentage::new_calc(
+            CalcNode::Sum(
+                vec![
+                    CalcNode::Leaf(ComputedLeaf::Length(Length::new(-10.0))),
+                    CalcNode::Leaf(ComputedLeaf::Percentage(CalcPercentageLeaf::new(
+                        0.1,
+                        Optional::Some(NumericBaseType::Length),
+                    ))),
+                ]
+                .into(),
+            ),
+            AllowedNumericType::All,
+        );
+        assert!(matches!(calc.unpack(), Unpacked::Calc(_)));
+        assert_eq!(calc.resolve(Length::new(100.0)).px(), 0.0);
+        let mut style = initial_style();
+        style
+            .mutate_margin()
+            .set_margin_left(GenericMargin::LengthPercentage(calc.clone()));
+        assert_eq!(inline_span_shaping_boundaries(&style), (true, false));
+        style.mutate_padding().set_padding_right(NonNegative(calc));
+        assert_eq!(inline_span_shaping_boundaries(&style), (true, true));
+    }
+
+    #[test]
+    fn only_effective_inline_borders_request_boundaries() {
+        for border_style in [BorderStyle::None, BorderStyle::Hidden, BorderStyle::Solid] {
+            for px in [0, 2] {
+                let mut style = initial_style();
+                style
+                    .mutate_border()
+                    .set_border_left_width(BorderSideWidth(app_units::Au::from_px(px)));
+                style.mutate_border().set_border_left_style(border_style);
+                let active = border_style == BorderStyle::Solid && px != 0;
+                assert_eq!(inline_span_shaping_boundaries(&style), (active, false));
+                style
+                    .mutate_border()
+                    .set_border_left_style(BorderStyle::None);
+                style
+                    .mutate_border()
+                    .set_border_right_width(BorderSideWidth(app_units::Au::from_px(px)));
+                style.mutate_border().set_border_right_style(border_style);
+                assert_eq!(inline_span_shaping_boundaries(&style), (false, active));
+            }
+        }
+    }
+
+    #[test]
+    fn boundary_sides_follow_the_owners_writing_mode() {
+        use style::computed_values::writing_mode::T as WritingModeProperty;
+
+        let mut style = initial_style();
+        style
+            .mutate_margin()
+            .set_margin_left(GenericMargin::LengthPercentage(length(2.0)));
+        style
+            .mutate_padding()
+            .set_padding_right(NonNegative(length(0.0)));
+        style
+            .mutate_inherited_box()
+            .set_direction(stylo::Direction::Rtl);
+        style.writing_mode = WritingMode::new(style.get_inherited_box());
+        assert_eq!(inline_span_shaping_boundaries(&style), (false, true));
+        style
+            .mutate_border()
+            .set_border_right_style(BorderStyle::Solid);
+        style
+            .mutate_border()
+            .set_border_right_width(BorderSideWidth(app_units::Au::from_px(2)));
+        assert_eq!(inline_span_shaping_boundaries(&style), (true, true));
+
+        for (direction, expected) in [
+            (stylo::Direction::Ltr, (true, false)),
+            (stylo::Direction::Rtl, (false, true)),
+        ] {
+            let mut style = initial_style();
+            style
+                .mutate_inherited_box()
+                .set_writing_mode(WritingModeProperty::VerticalRl);
+            style.mutate_inherited_box().set_direction(direction);
+            style.writing_mode = WritingMode::new(style.get_inherited_box());
+            style
+                .mutate_padding()
+                .set_padding_top(NonNegative(length(2.0)));
+            assert_eq!(inline_span_shaping_boundaries(&style), expected);
+        }
+    }
 
     #[test]
     fn explicit_zero_changes_boundary_intent_without_changing_geometry() {
         let initial =
             stylo::ComputedValues::initial_values_with_font_override(stylo::Font::initial_values());
         let mut style = (*initial).clone();
-        assert!(!inline_span_needs_shaping_boundaries(&style));
+        assert_eq!(inline_span_shaping_boundaries(&style), (false, false));
         assert_eq!(
             vertical_align(&style, None),
             parley::VerticalAlign::BASELINE
@@ -580,7 +823,7 @@ mod tests {
             stylo::BaselineShift::Length(LengthPercentage::new_percent(Percentage(0.0))),
         ] {
             style.mutate_box().set_baseline_shift(shift);
-            assert!(inline_span_needs_shaping_boundaries(&style));
+            assert_eq!(inline_span_shaping_boundaries(&style), (true, true));
             assert_eq!(
                 vertical_align(&style, None),
                 parley::VerticalAlign::BASELINE
@@ -593,11 +836,11 @@ mod tests {
         style
             .mutate_box()
             .set_baseline_shift(stylo::BaselineShift::implicit_zero());
-        assert!(!inline_span_needs_shaping_boundaries(&style));
+        assert_eq!(inline_span_shaping_boundaries(&style), (false, false));
         style
             .mutate_box()
             .set_alignment_baseline(stylo::AlignmentBaseline::Middle);
-        assert!(inline_span_needs_shaping_boundaries(&style));
+        assert_eq!(inline_span_shaping_boundaries(&style), (true, true));
         assert_eq!(vertical_align(&style, None), parley::VerticalAlign::MIDDLE);
     }
 

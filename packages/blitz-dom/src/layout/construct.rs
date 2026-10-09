@@ -1363,11 +1363,14 @@ pub(crate) fn build_inline_layout_into(
                             builder.pop_style_span();
                         } else {
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
-                            let shaping_boundary = nodes.quirks_mode()
-                                == crate::QuirksMode::NoQuirks
-                                && style.is_some_and(|s| {
-                                    stylo_to_parley::inline_span_needs_shaping_boundaries(s)
-                                });
+                            let (boundary_before, boundary_after) =
+                                if nodes.quirks_mode() == crate::QuirksMode::NoQuirks {
+                                    style
+                                        .map(|s| stylo_to_parley::inline_span_shaping_boundaries(s))
+                                        .unwrap_or((false, false))
+                                } else {
+                                    (false, false)
+                                };
                             let style = node
                                 .primary_styles()
                                 .map(|s| {
@@ -1384,8 +1387,8 @@ pub(crate) fn build_inline_layout_into(
 
                             builder.push_style_span_with_shaping_boundaries(
                                 style,
-                                shaping_boundary,
-                                shaping_boundary,
+                                boundary_before,
+                                boundary_after,
                             );
 
                             if let Some(before_id) = node.before() {
