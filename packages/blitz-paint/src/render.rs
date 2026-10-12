@@ -74,6 +74,9 @@ pub struct BlitzDomPainter<'dom, 'a> {
     pub(crate) table_backgrounds: RefCell<HashSet<NodeId>>,
     /// Cached selection ranges for O(1) lookup: node_id -> (start_offset, end_offset)
     pub(crate) selection_ranges: HashMap<NodeId, (usize, usize)>,
+    /// The ancestors of elements with a `mix-blend-mode` other than `normal`:
+    /// those that are stacking contexts isolate the blending in a layer.
+    pub(crate) blend_ancestors: HashSet<NodeId>,
 
     // Pre-computed `Scene`s for each CustomWidget
     pub(crate) custom_widget_scenes: &'a CustomWidgetSceneMap,
@@ -98,6 +101,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
         let layer_manager = LayerManager::default();
         let root_element_id = dom.try_root_element().map(|el| el.id);
+        let blend_ancestors = blend_ancestors(dom, root_element_id);
 
         Self {
             dom,
@@ -115,6 +119,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             draw_text_context: RefCell::new(DrawTextContext::default()),
             table_backgrounds: RefCell::new(HashSet::new()),
             selection_ranges,
+            blend_ancestors,
             custom_widget_scenes,
         }
     }
@@ -401,14 +406,61 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         if css_clip_rect.is_some_and(|rect| rect.is_zero_area()) {
             return;
         }
-        let css_clip_layer_pushed = self.layer_manager.maybe_push_layer(
+
+        // `mix-blend-mode` (Compositing 1): the element's whole rendering is
+        // drawn in a layer blended with what its isolated group has painted
+        // behind it, also outside the clips of ancestors that do not isolate
+        // (`overflow`, `clip`): those are closed around the blend layer and
+        // drawn again inside it. Chromium ignores the property on the root
+        // element, the root group. A stacking context with a blended
+        // element inside isolates it in a layer of its own (the effect,
+        // clip-path and mask layers below are isolated groups as well). Both
+        // layers cover the viewport: content outside it is not drawn.
+        let is_root = Some(node_id) == self.root_element_id;
+        let blend = if is_root {
+            None
+        } else {
+            crate::blend::mix_blend_mode(effects.mix_blend_mode)
+        };
+        let isolate = blend.is_none()
+            && !is_root
+            && self.blend_ancestors.contains(&node_id)
+            && node.is_stacking_context_root(is_flex_or_grid_item(self.dom, node));
+        let group_transform = Affine::translate((self.initial_x, self.initial_y));
+        let group_bounds = Rect::new(0.0, 0.0, self.width as f64, self.height as f64);
+        let mut suspended_clips = None;
+        if let Some(mode) = blend {
+            let clips = self.layer_manager.suspend_backdrop_clips(scene);
+            scene.push_layer(
+                Fill::NonZero,
+                mode,
+                1.0,
+                group_transform,
+                &group_bounds,
+                None,
+                None,
+            );
+            self.layer_manager.begin_group();
+            self.layer_manager.resume_backdrop_clips(scene, &clips);
+            suspended_clips = Some(clips);
+        } else if isolate {
+            scene.push_layer(
+                Fill::NonZero,
+                peniko::Mix::Normal,
+                1.0,
+                group_transform,
+                &group_bounds,
+                None,
+                None,
+            );
+            self.layer_manager.begin_group();
+        }
+
+        let css_clip_layer_pushed = self.layer_manager.maybe_push_backdrop_clip(
             scene,
             css_clip_rect.is_some(),
-            1.0,
             cx.transform,
             &css_clip_rect.unwrap_or(Rect::ZERO),
-            None,
-            None,
         );
 
         let current_color = cx.style.clone_color();
@@ -436,9 +488,15 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             None,
             None,
             |scene| {
+                if has_clip_path {
+                    self.layer_manager.begin_group();
+                }
                 // If the element has a CSS `mask`, then push an isolation layer for the
                 // masked content. The mask is applied when the layer is popped below.
                 let mask_layer_pushed = cx.maybe_push_css_mask_layer(scene);
+                if mask_layer_pushed {
+                    self.layer_manager.begin_group();
+                }
                 // `cx.transform` is mutated to apply scroll offsets while drawing content.
                 // Save it so that the mask can be drawn untransformed by scroll offsets.
                 let unscrolled_transform = cx.transform;
@@ -485,15 +543,19 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 };
 
                 // Opacity/Filter layer if box has opacity or a filter.
+                let effect_layer = has_opacity || filter.is_some() || layer_backdrop.is_some();
                 self.layer_manager.maybe_with_layer(
                     scene,
-                    has_opacity || filter.is_some() || layer_backdrop.is_some(),
+                    effect_layer,
                     opacity,
                     cx.transform,
                     &effect_layer_clip,
                     filter,
                     layer_backdrop,
                     |scene| {
+                        if effect_layer {
+                            self.layer_manager.begin_group();
+                        }
                         if decorations_in_effect_layer {
                             cx.swap_fieldset_frame(&mut fieldset);
                             cx.draw_outset_box_shadow(scene);
@@ -541,39 +603,38 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                             &cx.frame.padding_box_path()
                         };
 
-                        // Clip layer if box requires clipping. Opacity set to 1.0
-                        self.layer_manager.maybe_with_layer(
+                        // Clip layer if box requires clipping. An overflow
+                        // clip does not isolate blending.
+                        let clipped = self.layer_manager.maybe_push_backdrop_clip(
                             scene,
                             should_clip,
-                            1.0, // opacity
                             cx.transform,
                             clip,
-                            None,
-                            None,
-                            |scene| {
-                                // Now that background has been drawn, offset pos and cx in order to draw our contents scrolled
-                                let content_position = Point {
-                                    x: content_position.x - node.scroll_offset().x,
-                                    y: content_position.y - node.scroll_offset().y,
-                                };
-
-                                cx.transform = transform.then_translate(Vec2 {
-                                    x: -node.scroll_offset().x * self.scale,
-                                    y: -node.scroll_offset().y * self.scale,
-                                });
-                                cx.draw_image(scene);
-                                #[cfg(feature = "svg")]
-                                cx.draw_svg(scene);
-                                #[cfg(feature = "custom-widget")]
-                                cx.draw_custom_widget(scene);
-                                cx.draw_sub_document(scene);
-                                cx.draw_input(scene);
-                                cx.draw_text_input_text(scene, content_position);
-                                cx.draw_inline_layout(scene, content_position);
-                                cx.draw_marker(scene, content_position);
-                                cx.draw_children(scene, cx.transform, child_clip_rect);
-                            },
                         );
+                        {
+                            // Now that background has been drawn, offset pos and cx in order to draw our contents scrolled
+                            let content_position = Point {
+                                x: content_position.x - node.scroll_offset().x,
+                                y: content_position.y - node.scroll_offset().y,
+                            };
+
+                            cx.transform = transform.then_translate(Vec2 {
+                                x: -node.scroll_offset().x * self.scale,
+                                y: -node.scroll_offset().y * self.scale,
+                            });
+                            cx.draw_image(scene);
+                            #[cfg(feature = "svg")]
+                            cx.draw_svg(scene);
+                            #[cfg(feature = "custom-widget")]
+                            cx.draw_custom_widget(scene);
+                            cx.draw_sub_document(scene);
+                            cx.draw_input(scene);
+                            cx.draw_text_input_text(scene, content_position);
+                            cx.draw_inline_layout(scene, content_position);
+                            cx.draw_marker(scene, content_position);
+                            cx.draw_children(scene, cx.transform, child_clip_rect);
+                        }
+                        self.layer_manager.maybe_pop_backdrop_clip(scene, clipped);
 
                         // Outlines cover the border/content and remain unscrolled.
                         cx.transform = unscrolled_transform;
@@ -586,17 +647,38 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                             cx.transform = unscrolled_transform;
                             cx.draw_scrollbars(scene);
                         }
+                        if effect_layer {
+                            self.layer_manager.end_group();
+                        }
                     },
                 );
 
                 // Apply the CSS `mask` (if any) to the content drawn above
                 cx.transform = unscrolled_transform;
+                if mask_layer_pushed {
+                    self.layer_manager.end_group();
+                }
                 cx.maybe_pop_css_mask_layer(scene, mask_layer_pushed);
+                if has_clip_path {
+                    self.layer_manager.end_group();
+                }
             },
         );
 
         self.layer_manager
-            .maybe_pop_layer(scene, css_clip_layer_pushed);
+            .maybe_pop_backdrop_clip(scene, css_clip_layer_pushed);
+
+        if let Some(clips) = suspended_clips {
+            // Close the clips drawn again inside the blend layer, blend it,
+            // and reopen them for what the group paints next.
+            self.layer_manager.suspend_backdrop_clips(scene);
+            self.layer_manager.end_group();
+            scene.pop_layer();
+            self.layer_manager.resume_backdrop_clips(scene, &clips);
+        } else if isolate {
+            self.layer_manager.end_group();
+            scene.pop_layer();
+        }
     }
 
     fn render_node(
@@ -664,6 +746,47 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             custom_widget_scene,
         }
     }
+}
+
+/// The ancestors (in the layout tree) of the elements other than the root
+/// with a `mix-blend-mode` other than `normal`.
+fn blend_ancestors(dom: &BaseDocument, root_element_id: Option<NodeId>) -> HashSet<NodeId> {
+    use style::computed_values::mix_blend_mode::T as MixBlendMode;
+    let tree = dom.tree();
+    let mut ancestors = HashSet::new();
+    for (id, node) in tree.iter() {
+        if Some(id) == root_element_id
+            || node
+                .primary_styles()
+                .is_none_or(|style| style.get_effects().mix_blend_mode == MixBlendMode::Normal)
+        {
+            continue;
+        }
+        let mut current = node.layout_parent.get().or(node.parent);
+        while let Some(id) = current {
+            if !ancestors.insert(id) {
+                break;
+            }
+            let ancestor = &tree[id];
+            current = ancestor.layout_parent.get().or(ancestor.parent);
+        }
+    }
+    ancestors
+}
+
+/// Whether the node is a flex or grid item (a `z-index` then makes it a
+/// stacking context without positioning).
+fn is_flex_or_grid_item(dom: &BaseDocument, node: &Node) -> bool {
+    node.layout_parent
+        .get()
+        .and_then(|parent| dom.get_node(parent))
+        .and_then(|parent| parent.primary_styles())
+        .is_some_and(|style| {
+            matches!(
+                style.clone_display().inside(),
+                DisplayInside::Flex | DisplayInside::Grid
+            )
+        })
 }
 
 fn to_image_quality(image_rendering: ImageRendering) -> peniko::ImageQuality {
@@ -1218,6 +1341,9 @@ impl ElementCx<'_, '_> {
             let frame = create_css_rect(&style, node.final_layout(), self.scale);
             let clip = frame.padding_box_path();
             scene.push_clip_layer(peniko::Fill::NonZero, transform, &clip);
+            self.context
+                .layer_manager
+                .record_backdrop_clip(transform, &clip);
             let screen = Affine::translate((-self.initial_x, -self.initial_y)) * transform;
             clip_rect = clip_rect.intersect(screen.transform_rect_bbox(clip.bounding_box()));
         }
@@ -1232,6 +1358,7 @@ impl ElementCx<'_, '_> {
             clip_rect,
         );
         for _ in clips {
+            self.context.layer_manager.forget_backdrop_clip();
             scene.pop_layer();
         }
     }

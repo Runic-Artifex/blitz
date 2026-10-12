@@ -199,6 +199,40 @@ impl ElementCx<'_, '_> {
             (*get_cyclic(&bg_styles.background_clip.0, layer_count - 1)).into();
         let background_clip_path = self.box_path(background_clip);
 
+        // `background-blend-mode` (Compositing 1): an image layer blends with
+        // the layers and the colour below it, which are isolated from what is
+        // painted behind the element. The isolation layer extends past the
+        // border box so that its edge does not antialias the background twice.
+        let blend_modes = &bg_styles.background_blend_mode.0;
+        let layer_blend = |idx: usize| {
+            if blend_modes.is_empty() {
+                return None;
+            }
+            crate::blend::background_blend_mode(*get_cyclic(blend_modes, idx))
+        };
+        let blends = (0..layer_count).any(|idx| {
+            layer_blend(idx).is_some()
+                && !layer_paints_nothing(&ImageLayerStyles::from_background(
+                    bg_styles, image_data, idx,
+                ))
+        });
+        if blends {
+            let bounds = self
+                .frame
+                .border_box_path()
+                .bounding_box()
+                .inflate(2.0, 2.0);
+            scene.push_layer(
+                Fill::NonZero,
+                peniko::Mix::Normal,
+                1.0,
+                self.transform,
+                &bounds,
+                None,
+                None,
+            );
+        }
+
         // Draw background color (if any)
         self.draw_solid_bg(scene, &background_clip_path);
 
@@ -209,6 +243,20 @@ impl ElementCx<'_, '_> {
             }
             let background_clip_path = self.box_path(layer.clip);
 
+            if let Some(mode) = layer_blend(idx) {
+                scene.push_layer(
+                    Fill::NonZero,
+                    mode,
+                    1.0,
+                    self.transform,
+                    &background_clip_path,
+                    None,
+                    None,
+                );
+                self.draw_image_layer(scene, &layer);
+                scene.pop_layer();
+                continue;
+            }
             self.context.layer_manager.maybe_with_layer(
                 scene,
                 true,
@@ -221,6 +269,9 @@ impl ElementCx<'_, '_> {
                     self.draw_image_layer(scene, &layer);
                 },
             );
+        }
+        if blends {
+            scene.pop_layer();
         }
         if clipped_cell {
             scene.pop_layer();

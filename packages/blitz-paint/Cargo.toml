@@ -48,3 +48,6 @@ usvg = { workspace = true, optional = true }
 bytemuck = { workspace = true }
 smallvec = { workspace = true }
 tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+anyrender_vello_cpu = { workspace = true }

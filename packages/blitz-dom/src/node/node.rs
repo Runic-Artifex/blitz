@@ -19,6 +19,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use style::computed_values::isolation::T as Isolation;
+use style::computed_values::mix_blend_mode::T as MixBlendMode;
 use style::computed_values::white_space_collapse::T as WhiteSpaceCollapse;
 use style::invalidation::element::restyle_hints::RestyleHint;
 use style::properties::ComputedValues;
@@ -1348,7 +1349,12 @@ impl Node {
             return true;
         }
 
-        // TODO: mix-blend-mode
+        // An element blended with its backdrop is composited as a whole
+        // (Compositing 1 §3.2), so it paints as a stacking context.
+        if style.get_effects().mix_blend_mode != MixBlendMode::Normal {
+            return true;
+        }
+
         // TODO: contain
 
         false
