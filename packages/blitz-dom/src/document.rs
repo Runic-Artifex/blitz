@@ -1480,6 +1480,7 @@ impl BaseDocument {
                         )
                     }),
                     style: overrides.style,
+                    unicode_range: overrides.unicode_range.as_deref(),
                     ..Default::default()
                 };
 

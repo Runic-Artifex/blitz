@@ -924,12 +924,12 @@ pub(crate) fn compute_table_layout(
     use style::values::generics::box_::BaselineShiftKeyword;
     use taffy::{AvailableSpace, LayoutInput, LayoutPartialTree, RunMode, Size, SizingMode};
     let mut style = ctx.style.clone();
-    let measure = |doc: &mut BaseDocument, id: NodeId, available| {
+    let measure_with = |doc: &mut BaseDocument, id: NodeId, available, sizing_mode| {
         doc.compute_child_layout(
             crate::taffy_node_id(id),
             LayoutInput {
                 run_mode: RunMode::ComputeSize,
-                sizing_mode: SizingMode::InherentSize,
+                sizing_mode,
                 known_dimensions: Size::NONE,
                 parent_size: Size::NONE,
                 available_space: Size {
@@ -941,6 +941,9 @@ pub(crate) fn compute_table_layout(
         )
         .size
         .width
+    };
+    let measure = |doc: &mut BaseDocument, id: NodeId, available| {
+        measure_with(doc, id, available, SizingMode::InherentSize)
     };
     let padding = style
         .padding
@@ -963,52 +966,82 @@ pub(crate) fn compute_table_layout(
         caption_min = caption_min.max(measure(doc, *id, AvailableSpace::MinContent));
     }
     if !ctx.is_fixed && n > 0 {
-        let mut mins = vec![0.0f32; n];
-        let mut maxs = vec![0.0f32; n];
-        // First gather non-spanning cells; spanning constraints are distributed
-        // over their columns after those columns' own intrinsic sizes are known.
-        for spanning in [false, true] {
-            for cell in &ctx.cells {
-                let span = doc.nodes[cell.node_id]
-                    .attr(local_name!("colspan"))
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(1)
-                    .clamp(1, 1000);
-                if (span > 1) != spanning {
-                    continue;
-                }
-                let start = cell.column as usize;
-                let end = (start + span).min(n);
-                if start >= end {
-                    continue;
-                }
-                let min = measure(doc, cell.node_id, AvailableSpace::MinContent);
-                let max = measure(doc, cell.node_id, AvailableSpace::MaxContent).max(min);
-                let internal_gap = gap * (end - start - 1) as f32;
-                for (values, contribution) in [(&mut mins, min), (&mut maxs, max)] {
-                    let current: f32 = values[start..end].iter().sum();
-                    let extra = (contribution - internal_gap - current).max(0.0);
-                    let count = (end - start) as f32;
-                    for value in &mut values[start..end] {
-                        *value += if current > 0.0 {
-                            extra * *value / current
-                        } else {
-                            extra / count
-                        };
-                    }
+        // Column constraints as Blink's ApplyCellConstraintsToColumnConstraints
+        // builds them: `<col>` constraints, encompassing the constraints of the
+        // cells spanning one column; spanning cells are distributed over their
+        // columns after those columns' own intrinsic sizes are known.
+        let mut columns: Vec<ColumnConstraint> = style
+            .grid_template_columns
+            .iter()
+            .map(ColumnConstraint::from_column_element)
+            .collect();
+        let mut cell_constraints: Vec<Option<CellConstraint>> = vec![None; n];
+        for cell in &ctx.cells {
+            let start = cell.column as usize;
+            if cell.colspan != 1 || start >= n {
+                continue;
+            }
+            let constraint = cell_inline_constraint(doc, cell.node_id, measure_with);
+            match &mut cell_constraints[start] {
+                Some(merged) => merged.encompass(&constraint),
+                slot => *slot = Some(constraint),
+            }
+        }
+        for (column, cell) in columns.iter_mut().zip(&cell_constraints) {
+            if let Some(cell) = cell {
+                column.encompass(cell);
+            }
+        }
+        let mut mins: Vec<f32> = columns
+            .iter()
+            .map(|c| from_layout_unit(c.min.unwrap_or(0)))
+            .collect();
+        let mut maxs: Vec<f32> = columns
+            .iter()
+            .map(|c| from_layout_unit(c.max.unwrap_or(0)))
+            .collect();
+        for cell in &ctx.cells {
+            let span = usize::from(cell.colspan);
+            if span == 1 {
+                continue;
+            }
+            let start = cell.column as usize;
+            let end = (start + span).min(n);
+            if start >= end {
+                continue;
+            }
+            let min = measure(doc, cell.node_id, AvailableSpace::MinContent);
+            let max = measure(doc, cell.node_id, AvailableSpace::MaxContent).max(min);
+            let internal_gap = gap * (end - start - 1) as f32;
+            for (values, contribution) in [(&mut mins, min), (&mut maxs, max)] {
+                let current: f32 = values[start..end].iter().sum();
+                let extra = (contribution - internal_gap - current).max(0.0);
+                let count = (end - start) as f32;
+                for value in &mut values[start..end] {
+                    *value += if current > 0.0 {
+                        extra * *value / current
+                    } else {
+                        extra / count
+                    };
                 }
             }
         }
-        for (i, track) in style.grid_template_columns.iter().enumerate() {
-            if let taffy::GridTemplateComponent::Single(track) = track {
-                if track.min.into_raw().tag() == taffy::CompactLength::LENGTH_TAG {
-                    mins[i] = mins[i].max(track.min.into_raw().value());
-                    maxs[i] = maxs[i].max(mins[i]);
+        // Column percentages total at most 100%: a column gets what the
+        // columns before it leave (Blink, automatic tables).
+        let mut total_percent = 0.0;
+        for (i, column) in columns.iter_mut().enumerate() {
+            let min = to_layout_unit(mins[i]);
+            column.min = Some(min);
+            column.max = Some(to_layout_unit(maxs[i]).max(min));
+            if let Some(percent) = &mut column.percent {
+                if *percent + total_percent > 100.0 {
+                    *percent = 100.0 - total_percent;
                 }
+                total_percent += *percent;
             }
         }
-        let min: f32 = mins.iter().sum();
-        let max: f32 = maxs.iter().sum();
+        let min = from_layout_unit(columns.iter().filter_map(|c| c.min).sum());
+        let max = from_layout_unit(columns.iter().filter_map(|c| c.max).sum());
         let specified = style
             .size
             .width
@@ -1046,71 +1079,14 @@ pub(crate) fn compute_table_layout(
             .max(min + insets)
             .max(caption_min);
         let target = (width - insets).max(min);
-        let mut percentages = vec![0.0f32; n];
-        for (i, track) in ctx.style.grid_template_columns.iter().enumerate() {
-            if let taffy::GridTemplateComponent::Single(track) = track
-                && track.max.into_raw().tag() == taffy::CompactLength::PERCENT_TAG
-            {
-                percentages[i] = track.max.into_raw().value();
-            }
-        }
-        for cell in &ctx.cells {
-            if cell.colspan != 1 {
-                continue;
-            }
-            let cs = wrapper_style(doc, cell.node_id);
-            if cs.size.width.into_raw().tag() == taffy::CompactLength::PERCENT_TAG {
-                let i = cell.column as usize;
-                percentages[i] = percentages[i].max(cs.size.width.into_raw().value());
-            }
-        }
-        if percentages.iter().any(|p| *p > 0.0) {
-            let percent_sum: f32 = percentages.iter().sum();
-            let mut rest: f32 = 0.0;
-            let mut assigned: f32 = 0.0;
-            for i in 0..n {
-                if percentages[i] > 0.0 {
-                    maxs[i] = (target * percentages[i] / percent_sum.max(1.0)).max(mins[i]);
-                    assigned += maxs[i];
-                } else {
-                    rest += maxs[i];
-                }
-            }
-            for i in 0..n {
-                if percentages[i] == 0.0 {
-                    maxs[i] = if rest > 0.0 {
-                        (target - assigned).max(0.0) * maxs[i] / rest
-                    } else {
-                        0.0
-                    };
-                    maxs[i] = maxs[i].max(mins[i]);
-                }
-            }
-            // A percentage column may be held above its requested share by
-            // intrinsic content. Distribute the resulting over-constraint
-            // across the other tracks' shrinkable range, rather than letting
-            // the grid solver truncate the final column.
-            let assigned: f32 = maxs.iter().sum();
-            if assigned > target && assigned > min {
-                let fraction = (target - min) / (assigned - min);
-                for i in 0..n {
-                    maxs[i] = mins[i] + (maxs[i] - mins[i]) * fraction;
-                }
-            }
-        } else if target < max && max > min {
-            let fraction = (target - min) / (max - min);
-            for i in 0..n {
-                maxs[i] = mins[i] + (maxs[i] - mins[i]) * fraction;
-            }
-        } else if target > max {
-            for value in &mut maxs {
-                *value += if max > 0.0 {
-                    (target - max) * *value / max
-                } else {
-                    target / n as f32
-                };
-            }
-        }
+        let mins: Vec<f32> = columns
+            .iter()
+            .map(|c| from_layout_unit(c.min.unwrap_or(0)))
+            .collect();
+        let mut maxs: Vec<f32> = distribute_inline_size_auto(to_layout_unit(target), &columns)
+            .into_iter()
+            .map(from_layout_unit)
+            .collect();
         // Blink assigns whole LayoutUnits to tracks, leaving rounding remainder
         // in the final column rather than drifting each following boundary.
         let mut used = 0.0;
@@ -1749,8 +1725,403 @@ fn collapsed_borders(
     (horizontal, vertical, outer.map(style_helpers::length))
 }
 
-fn wrapper_style(doc: &BaseDocument, id: NodeId) -> taffy::Style<Atom> {
-    stylo_taffy::to_taffy_style(&doc.nodes[id].primary_styles().unwrap())
+/// Blink's LayoutUnit: 1/64 px fixed point. The automatic table algorithm
+/// runs in these units so that its truncations match Chromium.
+const LAYOUT_UNIT: f32 = 64.0;
+
+fn to_layout_unit(px: f32) -> i64 {
+    (px * LAYOUT_UNIT).round() as i64
+}
+
+fn from_layout_unit(value: i64) -> f32 {
+    value as f32 / LAYOUT_UNIT
+}
+
+/// `LayoutUnit(float)`: truncation toward zero.
+fn layout_unit_from_float(px: f32) -> i64 {
+    (px * LAYOUT_UNIT) as i64
+}
+
+/// The outer min-content and max-content widths of a cell spanning one column
+/// (CSS Tables 3 "computing cell measures"; Blink's
+/// `TableTypes::CreateCellInlineConstraint`), in LayoutUnits. `percent` is in
+/// percent (0..=100) as Blink stores it.
+#[derive(Clone, Copy, Debug)]
+struct CellConstraint {
+    min: i64,
+    max: i64,
+    percent: Option<f32>,
+    constrained: bool,
+}
+
+impl CellConstraint {
+    /// Blink's `CellInlineConstraint::Encompass`: cells of one column are
+    /// merged before the column's own constraint takes them in.
+    fn encompass(&mut self, other: &CellConstraint) {
+        self.min = self.min.max(other.min);
+        if self.constrained == other.constrained {
+            self.max = self.max.max(other.max);
+        } else if self.constrained {
+            self.max = self.max.max(other.min);
+        } else {
+            self.max = self.min.max(other.max);
+        }
+        self.constrained |= other.constrained;
+        if other.percent > self.percent {
+            self.percent = other.percent;
+        }
+    }
+}
+
+/// A column of an automatic table (Blink's `TableTypes::Column`). `min` and
+/// `max` stay unset for a column with neither a `<col>` nor a cell.
+#[derive(Clone, Copy, Debug, Default)]
+struct ColumnConstraint {
+    min: Option<i64>,
+    max: Option<i64>,
+    percent: Option<f32>,
+    constrained: bool,
+}
+
+impl ColumnConstraint {
+    /// Blink's `TableTypes::CreateColumn`, from the track `collect_columns`
+    /// built for a `<col>`: a length width is a constrained column (its
+    /// `max-width` already applied), a percentage width a percent column and a
+    /// lone `min-width` a minimum. A column with no `<col>` is auto.
+    fn from_column_element(track: &taffy::GridTemplateComponent<Atom>) -> Self {
+        let taffy::GridTemplateComponent::Single(track) = track else {
+            return Self::default();
+        };
+        let max = track.max.into_raw();
+        let min = track.min.into_raw();
+        if max.tag() == taffy::CompactLength::LENGTH_TAG {
+            Self {
+                min: Some(0),
+                max: Some(layout_unit_from_float(max.value())),
+                percent: None,
+                constrained: true,
+            }
+        } else if max.tag() == taffy::CompactLength::PERCENT_TAG {
+            Self {
+                min: Some(0),
+                max: None,
+                percent: Some(max.value() * 100.0).filter(|p| *p != 0.0),
+                constrained: false,
+            }
+        } else if min.tag() == taffy::CompactLength::LENGTH_TAG {
+            Self {
+                min: Some(layout_unit_from_float(min.value())),
+                ..Self::default()
+            }
+        } else {
+            Self::default()
+        }
+    }
+
+    /// Blink's `TableTypes::Column::Encompass` for an automatic table.
+    fn encompass(&mut self, cell: &CellConstraint) {
+        if let Some(min) = self.min {
+            self.min = Some(min.max(cell.min));
+            self.max = Some(if self.constrained {
+                let max = self.max.unwrap_or(0);
+                if cell.constrained {
+                    max.max(cell.max)
+                } else {
+                    max.max(cell.min)
+                }
+            } else {
+                self.max.unwrap_or(0).max(cell.max)
+            });
+        } else {
+            self.min = Some(cell.min);
+            self.max = Some(cell.max);
+        }
+        if let (Some(min), Some(max)) = (self.min, self.max) {
+            self.max = Some(min.max(max));
+        }
+        if cell.percent > self.percent {
+            self.percent = cell.percent;
+        }
+        self.constrained |= cell.constrained;
+    }
+}
+
+/// Blink's `TableTypes::CreateCellInlineConstraint` for an automatic table.
+///
+/// CSS lengths are border-box values: a content-box `width` adds the cell's
+/// border and padding, a border-box one is at least them. A length `width`
+/// makes the column constrained and replaces the content's max-content
+/// width, while the content's min-content width still holds. `measure`
+/// returns the cell's border-box width for an available width and sizing
+/// mode; the content is measured without its own size properties.
+fn cell_inline_constraint(
+    doc: &mut BaseDocument,
+    id: NodeId,
+    measure: impl Fn(&mut BaseDocument, NodeId, taffy::AvailableSpace, taffy::SizingMode) -> f32,
+) -> CellConstraint {
+    use taffy::{AvailableSpace, CompactLength, CoreStyle, SizingMode};
+    let (border_padding, content_box, width, min_width, max_width) = {
+        let style = doc.nodes[id].layout_style();
+        let padding = style.padding().resolve_or_zero(None, resolve_calc_value);
+        let border = style.border().resolve_or_zero(None, resolve_calc_value);
+        (
+            to_layout_unit(padding.left + padding.right + border.left + border.right),
+            style.box_sizing() == taffy::BoxSizing::ContentBox,
+            style.size().width.into_raw(),
+            style.min_size().width.into_raw(),
+            style.max_size().width.into_raw(),
+        )
+    };
+    let fixed = |length: CompactLength| {
+        (length.tag() == CompactLength::LENGTH_TAG).then(|| {
+            let length = layout_unit_from_float(length.value());
+            if content_box {
+                length + border_padding
+            } else {
+                length.max(border_padding)
+            }
+        })
+    };
+    let css_width = fixed(width);
+    let css_min = fixed(min_width);
+    let css_max = fixed(max_width).map(|max| css_min.map_or(max, |min| max.max(min)));
+    let mut percent = (width.tag() == CompactLength::PERCENT_TAG).then(|| width.value() * 100.0);
+    if let Some(p) = &mut percent
+        && max_width.tag() == CompactLength::PERCENT_TAG
+    {
+        *p = p.min(max_width.value() * 100.0);
+    }
+
+    // A cell's own `width` would fix its measured size; Blink measures the
+    // content (ComputeMinMaxSizes) and applies the CSS width itself. Its
+    // `min-width` and `max-width` clamp the measurement as Blink clamps it.
+    let mode = if css_width.is_some() {
+        SizingMode::ContentSize
+    } else {
+        SizingMode::InherentSize
+    };
+    let content_min = to_layout_unit(measure(doc, id, AvailableSpace::MinContent, mode));
+    let mut min = content_min.max(css_min.unwrap_or(0));
+    let mut content_max = css_width
+        .unwrap_or_else(|| to_layout_unit(measure(doc, id, AvailableSpace::MaxContent, mode)));
+    if let Some(css_max) = css_max {
+        content_max = content_max.min(css_max);
+        min = min.min(css_max);
+    }
+    CellConstraint {
+        min,
+        max: min.max(content_max),
+        percent,
+        constrained: css_width.is_some(),
+    }
+}
+
+/// Distribute the table's assignable inline size over its columns as Blink's
+/// `DistributeInlineSizeToComputedInlineSizeAuto` does (CSS Tables 3 "width
+/// distribution algorithm"), with a constrained target.
+///
+/// Guesses: every column at its minimum; percent columns at their
+/// percentage; constrained columns at their width; auto columns at their
+/// max-content width. The target falls between two guesses, and the columns
+/// that change between them grow in proportion to that change. Above the
+/// max guess the excess goes to the auto columns in proportion to their
+/// max-content widths (equally when they total zero); with no auto column, to
+/// the constrained columns in proportion to their widths; with neither, to the
+/// percent columns in proportion to their percentages. Arithmetic is in
+/// LayoutUnits with truncating multiply-divide, and the last growing column
+/// takes the truncation remainder.
+fn distribute_inline_size_auto(target: i64, columns: &[ColumnConstraint]) -> Vec<i64> {
+    const MIN: usize = 0;
+    const PERCENTAGE: usize = 1;
+    const SPECIFIED: usize = 2;
+    const MAX: usize = 3;
+    let min_of = |c: &ColumnConstraint| c.min.unwrap_or(0);
+    let max_of = |c: &ColumnConstraint| c.max.unwrap_or(0);
+    // `*percent * target / 100` in floats, then `LayoutUnit(float)`.
+    let resolve_percent = |c: &ColumnConstraint, target: i64| {
+        min_of(c).max(layout_unit_from_float(
+            c.percent.unwrap_or(0.0) * from_layout_unit(target) / 100.0,
+        ))
+    };
+    let mul_div = |value: i64, multiplier: i64, divisor: i64| value * multiplier / divisor;
+
+    let mut percent_count = 0i64;
+    let mut fixed_count = 0i64;
+    let mut auto_count = 0i64;
+    let mut guesses = [0i64; 4];
+    let mut increases = [0i64; 4];
+    let mut total_percent = 0.0f32;
+    let mut total_auto_max = 0i64;
+    let mut total_fixed_max = 0i64;
+    for c in columns {
+        let (min, max) = (min_of(c), max_of(c));
+        if c.percent.is_some() {
+            percent_count += 1;
+            total_percent += c.percent.unwrap_or(0.0);
+            let size = resolve_percent(c, target);
+            guesses[MIN] += min;
+            guesses[PERCENTAGE] += size;
+            guesses[SPECIFIED] += size;
+            guesses[MAX] += size;
+            increases[PERCENTAGE] += size - min;
+        } else if c.constrained {
+            fixed_count += 1;
+            total_fixed_max += max;
+            guesses[MIN] += min;
+            guesses[PERCENTAGE] += min;
+            guesses[SPECIFIED] += max;
+            guesses[MAX] += max;
+            increases[SPECIFIED] += max - min;
+        } else {
+            auto_count += 1;
+            total_auto_max += max;
+            guesses[MIN] += min;
+            guesses[PERCENTAGE] += min;
+            guesses[SPECIFIED] += min;
+            guesses[MAX] += max;
+            increases[MAX] += max - min;
+        }
+    }
+
+    let mut sizes = vec![0i64; columns.len()];
+    let target = target.max(guesses[MIN]);
+    let starting_guess = (MIN..=MAX).find(|&guess| guesses[guess] >= target);
+    let mut last = None;
+    let mut deficit = 0;
+    match starting_guess {
+        Some(MIN) => {
+            for (size, c) in sizes.iter_mut().zip(columns) {
+                *size = min_of(c);
+            }
+        }
+        Some(PERCENTAGE) => {
+            let distributable = target - guesses[MIN];
+            deficit = distributable;
+            for (i, c) in columns.iter().enumerate() {
+                sizes[i] = if c.percent.is_some() {
+                    last = Some(i);
+                    let delta = if increases[PERCENTAGE] > 0 {
+                        mul_div(
+                            distributable,
+                            resolve_percent(c, target) - min_of(c),
+                            increases[PERCENTAGE],
+                        )
+                    } else {
+                        distributable / percent_count
+                    };
+                    deficit -= delta;
+                    min_of(c) + delta
+                } else {
+                    min_of(c)
+                };
+            }
+        }
+        Some(SPECIFIED) => {
+            let distributable = target - guesses[PERCENTAGE];
+            deficit = distributable;
+            for (i, c) in columns.iter().enumerate() {
+                sizes[i] = if c.percent.is_some() {
+                    resolve_percent(c, target)
+                } else if c.constrained {
+                    last = Some(i);
+                    let delta = if increases[SPECIFIED] > 0 {
+                        mul_div(distributable, max_of(c) - min_of(c), increases[SPECIFIED])
+                    } else {
+                        distributable / fixed_count
+                    };
+                    deficit -= delta;
+                    min_of(c) + delta
+                } else {
+                    min_of(c)
+                };
+            }
+        }
+        Some(_) => {
+            let distributable = target - guesses[SPECIFIED];
+            // An exact match is usually an auto-width table: the columns take
+            // their max-content widths without distribution rounding.
+            let exact = target == guesses[MAX];
+            deficit = if exact { 0 } else { distributable };
+            for (i, c) in columns.iter().enumerate() {
+                sizes[i] = if c.percent.is_some() {
+                    resolve_percent(c, target)
+                } else if c.constrained || exact {
+                    max_of(c)
+                } else {
+                    last = Some(i);
+                    let delta = if increases[MAX] > 0 {
+                        mul_div(distributable, max_of(c) - min_of(c), increases[MAX])
+                    } else {
+                        distributable / auto_count
+                    };
+                    deficit -= delta;
+                    min_of(c) + delta
+                };
+            }
+        }
+        None => {
+            let distributable = target - guesses[MAX];
+            deficit = distributable;
+            if auto_count > 0 {
+                for (i, c) in columns.iter().enumerate() {
+                    sizes[i] = if c.percent.is_some() {
+                        resolve_percent(c, target)
+                    } else if c.constrained {
+                        max_of(c)
+                    } else {
+                        last = Some(i);
+                        let delta = if total_auto_max > 0 {
+                            mul_div(distributable, max_of(c), total_auto_max)
+                        } else {
+                            distributable / auto_count
+                        };
+                        deficit -= delta;
+                        max_of(c) + delta
+                    };
+                }
+            } else if fixed_count > 0 {
+                for (i, c) in columns.iter().enumerate() {
+                    sizes[i] = if c.percent.is_some() {
+                        resolve_percent(c, target)
+                    } else {
+                        last = Some(i);
+                        let delta = if total_fixed_max > 0 {
+                            mul_div(distributable, max_of(c), total_fixed_max)
+                        } else {
+                            distributable / fixed_count
+                        };
+                        deficit -= delta;
+                        max_of(c) + delta
+                    };
+                }
+            } else if percent_count > 0 {
+                for (i, c) in columns.iter().enumerate() {
+                    last = Some(i);
+                    let delta = if total_percent != 0.0 {
+                        layout_unit_from_float(
+                            from_layout_unit(distributable) * c.percent.unwrap_or(0.0)
+                                / total_percent,
+                        )
+                    } else {
+                        distributable / percent_count
+                    };
+                    deficit -= delta;
+                    sizes[i] = resolve_percent(c, target) + delta;
+                }
+                // Blink tests the index's truthiness here, so a remainder
+                // is dropped when the last percent column is the first column.
+                if last == Some(0) {
+                    last = None;
+                }
+            }
+        }
+    }
+    if deficit != 0
+        && let Some(last) = last
+    {
+        sizes[last] += deficit;
+    }
+    sizes
 }
 
 fn count_rows(doc: &BaseDocument, id: NodeId) -> u16 {
@@ -1888,6 +2259,210 @@ mod tests {
                 .unwrap_or_default()
                 .iter()
                 .all(|child| document.nodes.contains_key(*child))
+        );
+    }
+}
+
+#[cfg(test)]
+// The expected widths are exact LayoutUnit (1/64 px) values.
+#[allow(clippy::excessive_precision)]
+mod auto_width_tests {
+    //! Column widths of automatic tables as Chromium 153 lays them out
+    //! (Blink's DistributeInlineSizeToComputedInlineSizeAuto), measured with
+    //! getBoundingClientRect on the first row's cells. Every table has
+    //! `border-spacing: 0` and cells with `padding: 0 8px`. A cell holds a
+    //! wrapping flex row of two boxes `a` and `b` px wide and 10 px high, so
+    //! its min-content width is max(a, b) + 16 and its max-content width
+    //! a + b + 16, without depending on fonts.
+
+    use blitz_traits::shell::{ColorScheme, Viewport};
+
+    use crate::{Attribute, BaseDocument, DocumentConfig, qual_name};
+
+    fn style(value: &str) -> Vec<Attribute> {
+        vec![Attribute {
+            name: qual_name!("style"),
+            value: value.into(),
+        }]
+    }
+
+    /// A cell's style and its two boxes.
+    type Cell<'a> = (&'a str, f32, f32);
+
+    /// The widths of the first row's cells in an 800x600 viewport.
+    fn widths(table_style: &str, rows: &[&[Cell]]) -> Vec<f32> {
+        let mut document = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(800, 600, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root = document.root_node().id;
+        let mut mutator = document.mutate();
+        let html = mutator.create_element(qual_name!("html", html), vec![]);
+        let body = mutator.create_element(qual_name!("body", html), style("margin:0"));
+        let table = mutator.create_element(
+            qual_name!("table", html),
+            style(&format!("border-spacing:0;{table_style}")),
+        );
+        let group = mutator.create_element(qual_name!("tbody", html), vec![]);
+        let mut first_row = Vec::new();
+        for (r, cells) in rows.iter().enumerate() {
+            let row = mutator.create_element(qual_name!("tr", html), vec![]);
+            for (cell_style, a, b) in cells.iter() {
+                let cell = mutator.create_element(
+                    qual_name!("td", html),
+                    style(&format!("padding:0 8px;{cell_style}")),
+                );
+                let flex = mutator.create_element(
+                    qual_name!("div", html),
+                    style("display:flex;flex-wrap:wrap"),
+                );
+                let boxes = [a, b].map(|w| {
+                    mutator.create_element(
+                        qual_name!("div", html),
+                        style(&format!("width:{w}px;height:10px")),
+                    )
+                });
+                mutator.append_children(flex, &boxes);
+                mutator.append_children(cell, &[flex]);
+                mutator.append_children(row, &[cell]);
+                if r == 0 {
+                    first_row.push(cell);
+                }
+            }
+            mutator.append_children(group, &[row]);
+        }
+        mutator.append_children(table, &[group]);
+        mutator.append_children(body, &[table]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root, &[html]);
+        drop(mutator);
+        document.resolve(0.0);
+        first_row
+            .into_iter()
+            .map(|cell| document.nodes[cell].unrounded_layout().size.width)
+            .collect()
+    }
+
+    const FOUR_COLUMNS: &[Cell] = &[
+        ("width:100px", 20.0, 20.0),
+        ("", 40.0, 60.0),
+        ("", 30.0, 90.0),
+        ("", 50.0, 50.0),
+    ];
+
+    /// Above the max-content guess the excess goes to the auto columns in
+    /// proportion to their max-content widths; the fixed column keeps its
+    /// width. Without a width, every column is at its max-content width.
+    #[test]
+    fn excess_grows_auto_columns() {
+        assert_eq!(
+            widths("width:558px", &[FOUR_COLUMNS]),
+            [116.0, 139.3125, 163.34375, 139.34375]
+        );
+        assert_eq!(widths("", &[FOUR_COLUMNS]), [116.0, 116.0, 136.0, 116.0]);
+    }
+
+    /// With no auto column, the fixed columns take the excess in proportion
+    /// to their widths.
+    #[test]
+    fn excess_grows_fixed_columns_without_auto_columns() {
+        assert_eq!(
+            widths(
+                "width:400px",
+                &[&[("width:50px", 10.0, 10.0), ("width:100px", 10.0, 10.0)]]
+            ),
+            [145.046875, 254.953125]
+        );
+    }
+
+    /// Between the minimum and the specified guess the fixed columns grow from
+    /// their minimum in proportion to their width less their minimum.
+    #[test]
+    fn fixed_columns_shrink_toward_their_minimum() {
+        assert_eq!(
+            widths(
+                "width:150px",
+                &[&[("width:100px", 20.0, 20.0), ("width:80px", 30.0, 30.0)]]
+            ),
+            [77.84375, 72.15625]
+        );
+    }
+
+    /// Between the specified and the max-content guess the auto columns grow
+    /// from their minimum, the fixed column at its width.
+    #[test]
+    fn auto_columns_grow_from_their_minimum() {
+        assert_eq!(
+            widths(
+                "width:300px",
+                &[&[
+                    ("width:100px", 10.0, 10.0),
+                    ("", 60.0, 60.0),
+                    ("", 40.0, 80.0)
+                ]]
+            ),
+            [116.0, 83.1875, 100.8125]
+        );
+    }
+
+    /// A percent column takes its percentage of the table; the auto column
+    /// takes the excess, not the fixed one.
+    #[test]
+    fn percent_columns_take_their_percentage() {
+        assert_eq!(
+            widths(
+                "width:400px",
+                &[&[
+                    ("width:25%", 10.0, 10.0),
+                    ("", 30.0, 30.0),
+                    ("width:50px", 10.0, 10.0)
+                ]]
+            ),
+            [100.0, 234.0, 66.0]
+        );
+    }
+
+    /// With only percent columns the excess follows their percentages.
+    #[test]
+    fn excess_grows_percent_columns_last() {
+        assert_eq!(
+            widths(
+                "width:500px",
+                &[&[("width:20%", 10.0, 10.0), ("width:30%", 10.0, 10.0)]]
+            ),
+            [200.0, 300.0]
+        );
+    }
+
+    /// A column's cells merge before the column takes them in: a fixed cell's
+    /// width yields to a wider minimum of an auto cell below it, and the
+    /// column stays fixed.
+    #[test]
+    fn cells_of_a_column_merge_as_chromium() {
+        assert_eq!(
+            widths(
+                "width:500px",
+                &[
+                    &[("width:60px", 10.0, 10.0), ("", 10.0, 10.0)],
+                    &[("", 50.0, 80.0), ("", 10.0, 10.0)]
+                ]
+            ),
+            [96.0, 404.0]
+        );
+    }
+
+    /// A border-box width already includes the cell's padding.
+    #[test]
+    fn border_box_cell_width() {
+        assert_eq!(
+            widths(
+                "width:400px",
+                &[&[
+                    ("width:100px;box-sizing:border-box", 10.0, 10.0),
+                    ("", 30.0, 30.0)
+                ]]
+            ),
+            [100.0, 300.0]
         );
     }
 }

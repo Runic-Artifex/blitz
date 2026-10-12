@@ -52,6 +52,9 @@ pub struct FontFaceOverrides {
     pub weight_range: Option<(f32, f32)>,
     /// `font-style` descriptor mapped to fontique's `FontStyle`.
     pub style: Option<parley::fontique::FontStyle>,
+    /// `unicode-range` descriptor as inclusive code point ranges; a rule
+    /// without one covers every code point (U+0-10FFFF).
+    pub unicode_range: Option<Vec<(u32, u32)>>,
 }
 
 #[derive(Clone, Debug)]
@@ -439,6 +442,7 @@ pub(crate) fn fetch_font_face_rules<'a>(
                         Some((range.0.compute()?.value(), range.1.compute()?.value()))
                     }),
                     style: descriptor.font_style.as_ref().map(stylo_to_fontique_style),
+                    unicode_range: Some(unicode_ranges(descriptor.unicode_range.as_deref())),
                     ..Default::default()
                 };
                 Some((src, overrides))
@@ -535,6 +539,22 @@ pub(crate) fn fetch_font_face_rules<'a>(
                 );
             }
         })
+}
+
+/// The `unicode-range` descriptor as inclusive code point ranges. A rule
+/// without one covers every code point (U+0-10FFFF): every face gets a range,
+/// so that fontique checks a family's faces last-defined first, as CSS
+/// Fonts 4 orders the faces of a family.
+fn unicode_ranges(descriptor: Option<&[cssparser::UnicodeRange]>) -> Vec<(u32, u32)> {
+    descriptor.map_or_else(
+        || vec![(0, 0x10FFFF)],
+        |ranges| {
+            ranges
+                .iter()
+                .map(|range| (range.start, range.end))
+                .collect()
+        },
+    )
 }
 
 /// Translate stylo's `@font-face` `font-style` descriptor into the fontique
@@ -644,6 +664,22 @@ mod tests {
 
     fn oblique(min_deg: f32, max_deg: f32) -> FontStyleRange {
         FontStyleRange::Oblique(Angle::from_degrees(min_deg), Angle::from_degrees(max_deg))
+    }
+
+    #[test]
+    fn unicode_range_descriptor_maps_to_inclusive_ranges() {
+        let ranges = [
+            cssparser::UnicodeRange {
+                start: 0,
+                end: 0xFF,
+            },
+            cssparser::UnicodeRange {
+                start: 0x2000,
+                end: 0x206F,
+            },
+        ];
+        assert_eq!(unicode_ranges(Some(&ranges)), [(0, 0xFF), (0x2000, 0x206F)]);
+        assert_eq!(unicode_ranges(None), [(0, 0x10FFFF)]);
     }
 
     #[test]

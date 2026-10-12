@@ -58,17 +58,14 @@ pub(crate) fn text_control_font_metrics(
     font_styles: &FontStyles,
     font_size: f32,
 ) -> Option<TextControlFontMetrics> {
-    use parley::fontique::{QueryFont, QueryStatus};
     use skrifa::instance::{LocationRef, Size};
     use skrifa::metrics::{GlyphMetrics, Metrics};
 
-    let mut query = query_for_font_styles(font_ctx, font_styles);
-    let mut primary: Option<QueryFont> = None;
-    query.matches_with(|font| {
-        primary = Some(font.clone());
-        QueryStatus::Stop
-    });
-    let primary = primary?;
+    // The primary font is the first available font: the first face whose
+    // `unicode-range` includes U+0020 (CSS Fonts 4; Chromium's
+    // FontFallbackList::DeterminePrimarySimpleFontData). A family of
+    // fontsource subsets declares its cyrillic face, which has no `0`, first.
+    let primary = query_for_font_styles(font_ctx, font_styles).first_available_font()?;
     let font_ref = skrifa::FontRef::from_index(primary.blob.as_ref(), primary.index).ok()?;
     let variations = stylo_to_parley::font_variations(&font_styles.font_variation_settings);
     let location = font_ref.axes().location(
@@ -153,15 +150,12 @@ impl FontMetricsProvider for BlitzFontMetricsProvider {
         fn find_font_for(query: &mut Query, ch: char) -> Option<QueryFont> {
             let mut font = None;
             query.matches_with(|q_font: &QueryFont| {
-                use skrifa::MetadataProvider;
-
-                let Ok(font_ref) = skrifa::FontRef::from_index(q_font.blob.as_ref(), q_font.index)
-                else {
-                    return QueryStatus::Continue;
-                };
-
-                let charmap = font_ref.charmap();
-                if charmap.map(ch).is_some() {
+                // Fontique's character map of a query font maps only the
+                // characters in the face's `unicode-range`.
+                if q_font
+                    .charmap()
+                    .is_some_and(|charmap| charmap.map(ch).is_some())
+                {
                     font = Some(q_font.clone());
                     QueryStatus::Stop
                 } else {
@@ -243,5 +237,146 @@ impl FontMetricsProvider for BlitzFontMetricsProvider {
             _ => 16.0,
         };
         style::values::computed::Length::from(Au::from_f32_px(size))
+    }
+}
+
+#[cfg(test)]
+mod unicode_range_tests {
+    //! Families of `@font-face` rules split by `unicode-range`, built from
+    //! DejaVu Sans and the crate's bullet font (space and bullets, no digits),
+    //! against Chromium 153's widths for the same rules:
+    //!
+    //! - Primary: bullet font for U+0400-04FF, DejaVu Sans for U+0000-00FF,
+    //!   then the bullet font for U+2190-21FF.
+    //! - Order: bullet font, then DejaVu Sans, both for U+2000-206F.
+    //! - Range: DejaVu Sans without a range, then the bullet font for U+0000-00FF.
+
+    use blitz_traits::shell::{ColorScheme, Viewport};
+
+    use crate::net::{FontFaceOverrides, Resource, ResourceLoadResponse};
+    use crate::{Attribute, BaseDocument, DocumentConfig, NodeId, qual_name};
+
+    const DEJAVU: &[u8] = include_bytes!("../../../examples/wasm_hello/assets/DejaVuSans.woff2");
+
+    fn attrs(pairs: &[(&str, &str)]) -> Vec<Attribute> {
+        pairs
+            .iter()
+            .map(|(name, value)| Attribute {
+                name: match *name {
+                    "size" => qual_name!("size"),
+                    _ => qual_name!("style"),
+                },
+                value: (*value).into(),
+            })
+            .collect()
+    }
+
+    /// Register a face as an `@font-face` rule with `family` and `range`
+    /// would, in definition order.
+    fn face(doc: &mut BaseDocument, family: &str, bytes: &[u8], range: Option<(u32, u32)>) {
+        doc.load_resource(ResourceLoadResponse {
+            request_id: 0,
+            node_id: None,
+            resolved_url: Some(format!("test://{family}")),
+            result: Ok(Resource::Font(
+                blitz_traits::net::Bytes::from(crate::decode_font_bytes(bytes).into_owned()),
+                FontFaceOverrides {
+                    family_name: Some(family.into()),
+                    // `fetch_font_face_rules` gives a rule without the
+                    // descriptor the whole range.
+                    unicode_range: Some(vec![range.unwrap_or((0, 0x10FFFF))]),
+                    ..Default::default()
+                },
+            )),
+        });
+    }
+
+    /// An element: its name, attributes and text.
+    type Element<'a> = (&'a str, &'a [(&'a str, &'a str)], Option<&'a str>);
+
+    /// The widths of `elements`, each in a block, in an 800x600 document.
+    fn widths(elements: &[Element]) -> Vec<f32> {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(800, 600, 1.0, ColorScheme::Light)),
+            font_ctx: Some(crate::build_single_font_ctx(DEJAVU)),
+            ..Default::default()
+        });
+        let bullet = crate::BULLET_FONT;
+        face(&mut doc, "PlainDejaVu", DEJAVU, None);
+        face(&mut doc, "Primary", bullet, Some((0x400, 0x4FF)));
+        face(&mut doc, "Primary", DEJAVU, Some((0, 0xFF)));
+        face(&mut doc, "Primary", bullet, Some((0x2190, 0x21FF)));
+        face(&mut doc, "Order", bullet, Some((0x2000, 0x206F)));
+        face(&mut doc, "Order", DEJAVU, Some((0x2000, 0x206F)));
+        face(&mut doc, "Range", DEJAVU, None);
+        face(&mut doc, "Range", bullet, Some((0, 0xFF)));
+
+        let root = doc.root_node().id;
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html", html), vec![]);
+        let body =
+            mutator.create_element(qual_name!("body", html), attrs(&[("style", "margin:0")]));
+        let mut ids: Vec<NodeId> = Vec::new();
+        for (name, attributes, text) in elements {
+            let element = match *name {
+                "input" => qual_name!("input", html),
+                _ => qual_name!("span", html),
+            };
+            let id = mutator.create_element(element, attrs(attributes));
+            if let Some(text) = text {
+                let text = mutator.create_text_node(text);
+                mutator.append_children(id, &[text]);
+            }
+            let block = mutator.create_element(qual_name!("div", html), vec![]);
+            mutator.append_children(block, &[id]);
+            mutator.append_children(body, &[block]);
+            ids.push(id);
+        }
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+        ids.into_iter()
+            .map(|id| doc.nodes[id].unrounded_layout().size.width)
+            .collect()
+    }
+
+    /// A text control's primary font is the first face, latest defined first,
+    /// whose range includes U+0020: DejaVu Sans, not either bullet face.
+    /// Chromium gives the same widths as for DejaVu Sans alone.
+    #[test]
+    fn text_control_uses_the_first_face_covering_space() {
+        const INPUT: &str = "padding:0;border:0;font-size:16px;font-family:";
+        let primary = format!("{INPUT}Primary");
+        let plain = format!("{INPUT}PlainDejaVu");
+        for (style, expected) in [(primary, [200.0, 45.0, 54.0]), (plain, [200.0, 45.0, 54.0])] {
+            assert_eq!(
+                widths(&[
+                    ("input", &[("style", &style)], None),
+                    ("input", &[("style", &style), ("size", "1")], None),
+                    ("input", &[("style", &style), ("size", "2")], None),
+                ]),
+                expected,
+                "{style}"
+            );
+        }
+    }
+
+    /// A character takes the latest-defined face whose range includes it, and
+    /// a face whose range excludes it is no candidate even if it has the
+    /// glyph. Chromium sets "•••" in DejaVu Sans (35.390625 px at 20px; the
+    /// bullet font's are 33.640625 px) in both families.
+    #[test]
+    fn characters_take_the_latest_face_whose_range_includes_them() {
+        const SPAN: &str = "display:inline-block;font-size:20px;font-family:";
+        let bullets = Some("\u{2022}\u{2022}\u{2022}");
+        assert_eq!(
+            widths(&[
+                ("span", &[("style", &format!("{SPAN}Order"))], bullets),
+                ("span", &[("style", &format!("{SPAN}Range"))], bullets),
+                ("span", &[("style", &format!("{SPAN}PlainDejaVu"))], bullets),
+            ]),
+            [35.390625, 35.390625, 35.390625]
+        );
     }
 }
