@@ -191,6 +191,7 @@ bytemuck = "1"
 rayon = "1"
 test-that = "0.5.2"
 thread_local = "1"
+unicode-segmentation = "1.13"
 
 [profile.profile]
 inherits = "release"

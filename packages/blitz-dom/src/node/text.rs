@@ -28,6 +28,8 @@ pub struct TextLayout {
     pub text: String,
     pub(crate) sources: Vec<parley::TextSourceRange>,
     pub content_widths: Option<ContentWidths>,
+    /// The characters `text-transform` changed, for copying the source text.
+    pub(crate) case_reverts: Vec<crate::layout::text_transform::CaseRevert>,
     pub layout: parley::layout::Layout<TextBrush>,
 }
 

@@ -39,6 +39,7 @@ use super::{
     list::{BULLET_FONT_FAMILY, collect_list_item_children},
     replaced::is_inline_box_element,
     table::build_table_context,
+    text_transform::{CaseContext, last_code_unit, resolve_reverts},
 };
 
 const DUMMY_NAME: QualName = qual_name!("div", html);
@@ -1262,6 +1263,9 @@ pub(crate) fn build_inline_layout_into(
     // `edge_less_spans`). Their boundaries do not affect it, so one rebuild suffices.
     let mut edge_less: Vec<NodeId> = Vec::new();
     loop {
+        // Blink's previous character for capitalize, and the characters case transforms
+        // change (copied text keeps the DOM's).
+        let mut case = CaseContext::new();
         // Create a parley tree builder
         let mut builder = layout_ctx.tree_builder(font_ctx, scale, true, &parley_style);
         builder.set_quantization_mode(QuantizationMode::Logical);
@@ -1300,6 +1304,16 @@ pub(crate) fn build_inline_layout_into(
                 Marker::String(str) => builder.push_text(str),
             }
         };
+        // The marker's text comes first in Blink's layout tree, inside or outside.
+        if let Some(list_item) = root_node
+            .element_data()
+            .and_then(|el| el.list_item_data.as_deref())
+        {
+            case.previous = match &list_item.marker {
+                Marker::Char(_) => ' ',
+                Marker::String(str) => last_code_unit(str).unwrap_or(case.previous),
+            };
+        }
 
         if let Some(before_id) = root_node.before() {
             build_inline_layout_recursive(
@@ -1309,6 +1323,7 @@ pub(crate) fn build_inline_layout_into(
                 text_transform,
                 scale,
                 &edge_less,
+                &mut case,
             );
         }
         for child_id in root_node.children.iter().copied() {
@@ -1319,6 +1334,7 @@ pub(crate) fn build_inline_layout_into(
                 text_transform,
                 scale,
                 &edge_less,
+                &mut case,
             );
         }
         if let Some(after_id) = root_node.after() {
@@ -1329,11 +1345,14 @@ pub(crate) fn build_inline_layout_into(
                 text_transform,
                 scale,
                 &edge_less,
+                &mut case,
             );
         }
 
         (text_layout.text, text_layout.sources) =
             builder.build_into_with_sources(&mut text_layout.layout);
+        text_layout.case_reverts =
+            resolve_reverts(&text_layout.text, &text_layout.sources, &case.pending);
         if !edge_less.is_empty() {
             break;
         }
@@ -1391,6 +1410,7 @@ pub(crate) fn build_inline_layout_into(
         parent_text_transform: TextTransform,
         scale: f32,
         edge_less: &[NodeId],
+        case: &mut CaseContext,
     ) {
         let node = &nodes[node_id];
 
@@ -1454,6 +1474,7 @@ pub(crate) fn build_inline_layout_into(
                                 text_transform,
                                 scale,
                                 edge_less,
+                                case,
                             );
                         }
                         builder.pop_style_span();
@@ -1482,6 +1503,7 @@ pub(crate) fn build_inline_layout_into(
                                     })
                                     .unwrap_or_default(),
                             });
+                            case.after_box(nodes, node_id);
                         } else if *tag_name == local_name!("br") {
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                             // TODO: update span id for br spans
@@ -1492,23 +1514,23 @@ pub(crate) fn build_inline_layout_into(
                             ]);
                             builder.push_text("\n");
                             builder.pop_style_span();
+                            case.previous = '\n';
                         } else {
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                             // Per-side shaping intent: alignment breaks shaping on both sides,
                             // nonzero inline box edges on their own side.
-                            let (boundary_before, boundary_after) = if nodes.quirks_mode()
-                                == crate::QuirksMode::NoQuirks
-                            {
-                                style.map_or((false, false), |s| {
+                            let (boundary_before, boundary_after) =
+                                if nodes.quirks_mode() == crate::QuirksMode::NoQuirks {
+                                    style.map_or((false, false), |s| {
                                     if edge_less.contains(&node_id) {
                                         stylo_to_parley::inline_span_edge_less_shaping_boundaries(s)
                                     } else {
                                         stylo_to_parley::inline_span_used_shaping_boundaries(s)
                                     }
                                 })
-                            } else {
-                                (false, false)
-                            };
+                                } else {
+                                    (false, false)
+                                };
                             let style = node
                                 .primary_styles()
                                 .map(|s| {
@@ -1537,6 +1559,7 @@ pub(crate) fn build_inline_layout_into(
                                     text_transform,
                                     scale,
                                     edge_less,
+                                    case,
                                 );
                             }
 
@@ -1548,6 +1571,7 @@ pub(crate) fn build_inline_layout_into(
                                     text_transform,
                                     scale,
                                     edge_less,
+                                    case,
                                 );
                             }
                             if let Some(after_id) = node.after() {
@@ -1558,6 +1582,7 @@ pub(crate) fn build_inline_layout_into(
                                     text_transform,
                                     scale,
                                     edge_less,
+                                    case,
                                 );
                             }
 
@@ -1586,6 +1611,7 @@ pub(crate) fn build_inline_layout_into(
                                 })
                                 .unwrap_or_default(),
                         });
+                        case.after_box(nodes, node_id);
                     }
                 };
             }
@@ -1593,20 +1619,8 @@ pub(crate) fn build_inline_layout_into(
                 // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                 // dbg!(&data.content);
 
-                // TODO: optimize case transforms to be non-allocating
-                match parent_text_transform {
-                    TextTransform::UPPERCASE => {
-                        builder
-                            .push_text_with_source(&data.content.to_uppercase(), node_id.as_u64());
-                    }
-                    TextTransform::LOWERCASE => {
-                        builder
-                            .push_text_with_source(&data.content.to_lowercase(), node_id.as_u64());
-                    }
-                    _ => {
-                        builder.push_text_with_source(&data.content, node_id.as_u64());
-                    }
-                }
+                let text = case.text(nodes, node_id, &data.content, parent_text_transform);
+                builder.push_text_with_source(&text, node_id.as_u64());
             }
             NodeData::Comment { .. } => {
                 // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);

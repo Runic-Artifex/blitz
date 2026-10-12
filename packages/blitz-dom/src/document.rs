@@ -3221,7 +3221,8 @@ impl BaseDocument {
             if !result.is_empty() {
                 result.push(' ');
             }
-            result.push_str(&inline_layout.text[*start..*end]);
+            // The DOM's characters where text-transform changed them, as Chromium copies.
+            result.push_str(&inline_layout.source_text(*start..*end));
         }
 
         if result.is_empty() {

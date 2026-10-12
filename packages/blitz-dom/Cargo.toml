@@ -74,6 +74,7 @@ slotmap = { workspace = true }
 bitflags = { workspace = true }
 tracing = { workspace = true, optional = true }
 rayon = { workspace = true }
+unicode-segmentation = { workspace = true }
 
 # Media & Decoding
 image = { workspace = true }
