@@ -418,10 +418,9 @@ pub(crate) fn build_table_context(
         *doc.nodes[row.node_id].layout_children.borrow_mut() = Some(row_children);
         doc.nodes[row.node_id].remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
         if let Some(group) = row.group {
+            // collect_table_cells reset the group's layout children.
             if !layout_children.contains(&group) {
                 layout_children.push(group);
-                *doc.nodes[group].layout_children.borrow_mut() = Some(Default::default());
-                doc.nodes[group].remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
             }
             doc.nodes[group]
                 .layout_children
@@ -559,6 +558,9 @@ fn collect_table_cells(
     };
 
     if display.outside() == DisplayOutside::None {
+        // A hidden box generates no boxes. Drop the layout children of an
+        // earlier construction, which may name nodes removed since.
+        *node.layout_children.borrow_mut() = Some(Default::default());
         node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
         return;
     }
@@ -580,6 +582,12 @@ fn collect_table_cells(
             if display.inside() != DisplayInside::Contents {
                 cursor.rowspans.fill(0);
                 cursor.group_end = *row + count_rows(doc, node_id);
+                // Rebuilt from its rows below. A group left without rows is
+                // not placed in the table, so it must not keep the rows of an
+                // earlier construction, which may have been removed since.
+                let group = &mut doc.nodes[node_id];
+                *group.layout_children.borrow_mut() = Some(Default::default());
+                group.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
             }
             let children = std::mem::take(&mut doc.nodes[node_id].children);
             for child_id in children.iter().copied() {
@@ -1758,4 +1766,128 @@ fn count_rows(doc: &BaseDocument, id: NodeId) -> u16 {
             }
         })
         .fold(0, u16::saturating_add)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{BaseDocument, DocumentConfig, NodeId, qual_name};
+
+    struct Table {
+        document: BaseDocument,
+        head: NodeId,
+        head_row: NodeId,
+        body_group: NodeId,
+        rows: [NodeId; 2],
+    }
+
+    /// A resolved table: a header group with one row and a body group with two.
+    fn table() -> Table {
+        let mut document = BaseDocument::new(DocumentConfig::default());
+        let root = document.root_node().id;
+        let mut mutator = document.mutate();
+        let mut element = |name| mutator.create_element(name, vec![]);
+        let html = element(qual_name!("html", html));
+        let body = element(qual_name!("body", html));
+        let table = element(qual_name!("table", html));
+        let head = element(qual_name!("thead", html));
+        let head_row = element(qual_name!("tr", html));
+        let head_cell = element(qual_name!("th", html));
+        let body_group = element(qual_name!("tbody", html));
+        let rows = [
+            element(qual_name!("tr", html)),
+            element(qual_name!("tr", html)),
+        ];
+        let cells = [
+            element(qual_name!("td", html)),
+            element(qual_name!("td", html)),
+        ];
+        mutator.append_children(head_row, &[head_cell]);
+        mutator.append_children(head, &[head_row]);
+        for (row, cell) in rows.into_iter().zip(cells) {
+            let text = mutator.create_text_node("Alpha");
+            mutator.append_children(cell, &[text]);
+            mutator.append_children(row, &[cell]);
+        }
+        mutator.append_children(body_group, &rows);
+        mutator.append_children(table, &[head, body_group]);
+        mutator.append_children(body, &[table]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root, &[html]);
+        drop(mutator);
+        document.resolve(0.0);
+        assert_eq!(
+            document.nodes[body_group]
+                .layout_children
+                .borrow()
+                .as_deref(),
+            Some(&rows[..])
+        );
+        Table {
+            document,
+            head,
+            head_row,
+            body_group,
+            rows,
+        }
+    }
+
+    fn layout_children(document: &BaseDocument, node_id: NodeId) -> Option<Vec<NodeId>> {
+        document.nodes[node_id]
+            .layout_children
+            .borrow()
+            .as_deref()
+            .map(<[NodeId]>::to_vec)
+    }
+
+    /// Removing the last rows of a row group leaves the group without rows,
+    /// so table construction never reaches it through a row. Its layout
+    /// children must still be rebuilt rather than keep the removed rows.
+    #[test]
+    fn emptied_row_group_drops_removed_rows_from_layout_children() {
+        let Table {
+            mut document,
+            head,
+            head_row,
+            body_group,
+            rows,
+        } = table();
+
+        let mut mutator = document.mutate();
+        for row in rows {
+            mutator.remove_and_drop_node(row);
+        }
+        drop(mutator);
+        document.resolve(0.0);
+
+        assert!(rows.iter().all(|row| !document.nodes.contains_key(*row)));
+        assert_eq!(layout_children(&document, body_group), Some(vec![]));
+        assert_eq!(layout_children(&document, head), Some(vec![head_row]));
+    }
+
+    /// A hidden row group takes no part in the table, so a row removed while
+    /// it is hidden must not stay among its layout children.
+    #[test]
+    fn hidden_row_group_drops_removed_rows_from_layout_children() {
+        let Table {
+            mut document,
+            body_group,
+            rows,
+            ..
+        } = table();
+
+        document
+            .mutate()
+            .set_attribute(body_group, qual_name!("style"), "display:none");
+        document.resolve(0.0);
+        document.mutate().remove_and_drop_node(rows[0]);
+        document.resolve(0.0);
+
+        assert!(!document.nodes.contains_key(rows[0]));
+        assert!(
+            layout_children(&document, body_group)
+                .unwrap_or_default()
+                .iter()
+                .all(|child| document.nodes.contains_key(*child))
+        );
+    }
 }
