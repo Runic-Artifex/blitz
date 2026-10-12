@@ -229,6 +229,59 @@ impl BaseDocument {
             .collect();
         assert!(inline_layout.layout.update_vertical_alignments(&alignments));
 
+        // Horizontal inline box edges likewise refresh without reshaping: they were attached
+        // to atoms when the paragraph was built (Parley tracks spans in standards mode only).
+        let standards = self.nodes.quirks_mode() == crate::QuirksMode::NoQuirks;
+        let mut edge_reports: Vec<&'static str> = Vec::new();
+        let edges: Vec<_> = inline_layout
+            .layout
+            .styles()
+            .iter()
+            .map(|style| {
+                let owner_id = style.brush.id;
+                if owner_id == node_id {
+                    return Some(parley::InlineEdges::ZERO);
+                }
+                let owner = self.nodes.get(owner_id)?;
+                let computed = owner.primary_styles()?;
+                let display = computed.clone_display();
+                if display.outside() != style::values::specified::box_::DisplayOutside::Inline
+                    || display.inside() != style::values::specified::box_::DisplayInside::Flow
+                {
+                    return Some(parley::InlineEdges::ZERO);
+                }
+                let (edges, unsupported) = stylo_to_parley::inline_span_edges(&computed, scale);
+                edge_reports.extend(unsupported);
+                if edges.is_zero() {
+                    return Some(edges);
+                }
+                if !standards {
+                    edge_reports.push(stylo_to_parley::INLINE_EDGE_QUIRKS);
+                    return Some(parley::InlineEdges::ZERO);
+                }
+                if !computed.writing_mode.is_bidi_ltr() {
+                    edge_reports.push(stylo_to_parley::INLINE_EDGE_RTL);
+                }
+                Some(edges)
+            })
+            .collect();
+        let edges_changed = edges.iter().enumerate().any(|(style, edges)| {
+            edges.is_some_and(|edges| edges != inline_layout.layout.inline_edges(style))
+        });
+        assert!(inline_layout.layout.update_inline_edges(&edges));
+        if edges_changed {
+            inline_layout.content_widths = None;
+        }
+        if inline_layout.layout.has_unplaced_inline_edges() {
+            edge_reports.push(stylo_to_parley::INLINE_EDGE_UNPLACED);
+        }
+        if inline_layout.layout.has_rtl_inline_edges() {
+            edge_reports.push(stylo_to_parley::INLINE_EDGE_RTL);
+        }
+        for report in edge_reports {
+            self.report_unsupported_layout(report);
+        }
+
         let style = self.nodes[node_id].layout_style();
 
         // Note: both horizontal and vertical percentage padding/borders are resolved against the container's inline size (i.e. width).

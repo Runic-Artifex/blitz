@@ -22,21 +22,49 @@ use crate::{FONT_EMBOLDEN_ENABLED, SELECTION_COLOR};
 ///
 /// The inline root's own background is painted separately (as a normal block box), so
 /// runs belonging to the root are skipped to avoid drawing it twice.
-pub(crate) fn draw_inline_backgrounds<'a>(
+///
+/// Inline elements with nonzero horizontal margin, border or padding instead paint their
+/// background and solid borders over each line fragment's border box (ancestors first),
+/// with the start border on the fragment carrying their opening edge and the end border on
+/// the one carrying their closing edge (`box-decoration-break: slice`).
+pub(crate) fn draw_inline_backgrounds(
     scene: &mut impl PaintScene,
-    lines: impl Iterator<Item = Line<'a, TextBrush>>,
+    text_layout: &blitz_dom::node::TextLayout,
     doc: &BaseDocument,
     transform: Affine,
     inline_root_id: NodeId,
 ) {
-    for line in lines {
+    let layout = &text_layout.layout;
+    let root = doc.get_node(inline_root_id);
+    let edge_styles: Vec<usize> = (0..layout.styles().len())
+        .filter(|&style| {
+            layout.styles()[style].brush.id != inline_root_id
+                && !layout.inline_edges(style).is_zero()
+        })
+        .collect();
+    for line in layout.lines() {
+        if let Some(root) = root {
+            for &style in &edge_styles {
+                draw_inline_box_edges(
+                    scene,
+                    text_layout,
+                    doc,
+                    root,
+                    line.clone(),
+                    style,
+                    transform,
+                );
+            }
+        }
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                 continue;
             };
 
             let node_id = glyph_run.style().brush.id;
-            if node_id == inline_root_id {
+            if node_id == inline_root_id
+                || edge_styles.contains(&usize::from(glyph_run.style_index()))
+            {
                 continue;
             }
 
@@ -55,8 +83,10 @@ pub(crate) fn draw_inline_backgrounds<'a>(
             }
 
             let metrics = glyph_run.run().font_metrics();
-            let x = glyph_run.offset() as f64;
-            let w = glyph_run.advance() as f64;
+            // Edges of other inline boxes at the run's ends are not part of this run's text.
+            let (left_edge, right_edge) = glyph_run.inline_edge_insets();
+            let x = (glyph_run.offset() + left_edge) as f64;
+            let w = (glyph_run.advance() - left_edge - right_edge) as f64;
             let baseline = glyph_run.baseline() as f64;
             let y0 = baseline - metrics.ascent as f64;
             let y1 = baseline + metrics.descent as f64;
@@ -64,6 +94,111 @@ pub(crate) fn draw_inline_backgrounds<'a>(
 
             scene.fill(Fill::NonZero, transform, bg_color, None, &rect);
         }
+    }
+}
+
+/// Paint one line fragment of an inline element with nonzero horizontal edges: its background
+/// over the border box, then its solid borders.
+fn draw_inline_box_edges(
+    scene: &mut impl PaintScene,
+    text_layout: &blitz_dom::node::TextLayout,
+    doc: &BaseDocument,
+    root: &blitz_dom::Node,
+    line: Line<'_, TextBrush>,
+    style_index: usize,
+    transform: Affine,
+) {
+    let layout = &text_layout.layout;
+    let Some(node) = doc.get_node(layout.styles()[style_index].brush.id) else {
+        return;
+    };
+    let Some(styles) = node.primary_styles() else {
+        return;
+    };
+    let Some((x0, x1)) = line.style_span_bounds(style_index) else {
+        return;
+    };
+    let Some((top, bottom)) = text_layout.span_block_bounds(line.clone(), node, root) else {
+        return;
+    };
+    let (x0, x1, top, bottom) = (x0 as f64, x1 as f64, top as f64, bottom as f64);
+    let current_color = styles.clone_color();
+    let bg_color = styles
+        .get_background()
+        .background_color
+        .resolve_to_absolute(&current_color)
+        .as_srgb_color();
+    if bg_color != Color::TRANSPARENT {
+        scene.fill(
+            Fill::NonZero,
+            transform,
+            bg_color,
+            None,
+            &Rect::new(x0, top, x1, bottom),
+        );
+    }
+
+    let scale = layout.scale() as f64;
+    let border = styles.get_border();
+    let (has_start, has_end) = line.inline_edge_sides(style_index);
+    let ltr = styles.writing_mode.is_bidi_ltr();
+    let (has_left, has_right) = if ltr {
+        (has_start, has_end)
+    } else {
+        (has_end, has_start)
+    };
+    let side = |style: style::values::computed::BorderStyle,
+                width: &style::values::computed::BorderSideWidth,
+                color: &style::values::computed::Color| {
+        if style.none_or_hidden() {
+            return None;
+        }
+        let width = width.0.to_f32_px() as f64 * scale;
+        (width > 0.0).then(|| {
+            (
+                width,
+                color.resolve_to_absolute(&current_color).as_srgb_color(),
+            )
+        })
+    };
+    let top_side = side(
+        border.border_top_style,
+        &border.border_top_width,
+        &border.border_top_color,
+    );
+    let bottom_side = side(
+        border.border_bottom_style,
+        &border.border_bottom_width,
+        &border.border_bottom_color,
+    );
+    let left_side = side(
+        border.border_left_style,
+        &border.border_left_width,
+        &border.border_left_color,
+    )
+    .filter(|_| has_left);
+    let right_side = side(
+        border.border_right_style,
+        &border.border_right_width,
+        &border.border_right_color,
+    )
+    .filter(|_| has_right);
+    let mut fill = |rect: Rect, color: Color| {
+        if rect.width() > 0.0 && rect.height() > 0.0 {
+            scene.fill(Fill::NonZero, transform, color, None, &rect);
+        }
+    };
+    if let Some((width, color)) = top_side {
+        fill(Rect::new(x0, top, x1, top + width), color);
+    }
+    if let Some((width, color)) = bottom_side {
+        fill(Rect::new(x0, bottom - width, x1, bottom), color);
+    }
+    if let Some((width, color)) = left_side {
+        fill(Rect::new(x0, top, x0 + width, bottom), color);
+    }
+    if let Some((width, color)) = right_side {
+        fill(Rect::new(x1 - width, top, x1, bottom), color);
     }
 }
 
@@ -799,8 +934,10 @@ pub(crate) fn stroke_text<'a>(
                     css_font_size,
                 };
                 let run_node_id = style.brush.id;
-                let run_x0 = glyph_run.offset() as f64;
-                let mut run_x1 = run_x0 + glyph_run.advance() as f64;
+                // Inline box edges at the run's ends carry no text to decorate.
+                let (left_edge, right_edge) = glyph_run.inline_edge_insets();
+                let run_x0 = (glyph_run.offset() + left_edge) as f64;
+                let mut run_x1 = (glyph_run.offset() + glyph_run.advance() - right_edge) as f64;
                 if let Some(e) = &ellipsis {
                     run_x1 = run_x1.min((e.visible_end + e.advance) as f64);
                 }

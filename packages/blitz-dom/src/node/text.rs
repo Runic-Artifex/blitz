@@ -64,8 +64,10 @@ impl TextLayout {
         run: &parley::layout::GlyphRun<'_, TextBrush>,
         node: &crate::Node,
     ) -> Option<(f32, f32)> {
-        let mut start = run.offset();
-        let mut end = start + run.advance();
+        // Inline box edges (margin, border, padding) at the run's ends are not text.
+        let (left_edge, right_edge) = run.inline_edge_insets();
+        let mut start = run.offset() + left_edge;
+        let mut end = run.offset() + run.advance() - right_edge;
         let collapses = node.primary_styles().is_some_and(|style| {
             matches!(
                 style.clone_white_space_collapse(),
@@ -96,7 +98,7 @@ impl TextLayout {
     /// Shared block-axis border bounds of a non-atomic inline span. Its own
     /// font content area is expanded by padding/border, never by line leading
     /// or descendants. Vertical percentage padding uses the context's width.
-    pub(crate) fn span_block_bounds(
+    pub fn span_block_bounds(
         &self,
         line: parley::Line<'_, TextBrush>,
         node: &crate::Node,

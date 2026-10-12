@@ -333,6 +333,17 @@ pub(crate) fn compute_layout_damage(old: &ComputedValues, new: &ComputedValues) 
             return true;
         }
 
+        // Chromium reshapes an ordinary inline box when its effective border presence (on any
+        // side) changes; margin, padding and border-width changes alone keep cached shaping.
+        let new_display = new.get_box().display;
+        if new_display.outside() == DisplayOutside::Inline
+            && new_display.inside() == DisplayInside::Flow
+            && crate::stylo_to_parley::inline_span_has_effective_border(old)
+                != crate::stylo_to_parley::inline_span_has_effective_border(new)
+        {
+            return true;
+        }
+
         let old_text = old.get_inherited_text();
         let new_text = new.get_inherited_text();
         if !std::ptr::eq(old_text, new_text)
@@ -509,6 +520,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn ordinary_inline_edges_reshape_only_on_border_presence() {
+        use style::values::computed::{BorderSideWidth, BorderStyle, Display};
+        let mut initial = initial_style();
+        initial.mutate_box().set_display(Display::Inline);
+        let mut padded = initial.clone();
+        padded
+            .mutate_padding()
+            .set_padding_left(NonNegative(LengthPercentage::new_length(Length::new(4.0))));
+        assert_eq!(
+            compute_layout_damage(&initial, &padded),
+            RestyleDamage::RELAYOUT
+        );
+        let mut solid = initial.clone();
+        solid
+            .mutate_border()
+            .set_border_top_style(BorderStyle::Solid);
+        // The initial width is medium (3px): the top border becomes effective.
+        assert_eq!(compute_layout_damage(&initial, &solid), ALL_DAMAGE);
+        let mut thin = solid.clone();
+        thin.mutate_border()
+            .set_border_top_width(BorderSideWidth(app_units::Au::from_px(1)));
+        assert_eq!(
+            compute_layout_damage(&solid, &thin),
+            RestyleDamage::RELAYOUT
+        );
     }
 
     #[test]

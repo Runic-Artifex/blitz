@@ -43,6 +43,7 @@ pub(crate) mod parley {
     pub(crate) use parley::FontVariation;
     pub(crate) use parley::fontique::QueryFamily;
     pub(crate) use parley::layout::Alignment;
+    pub(crate) use parley::layout::InlineEdges;
     pub(crate) use parley::setting::*;
     pub(crate) use parley::style::*;
 }
@@ -355,16 +356,8 @@ pub(crate) fn inline_span_needs_shaping_boundaries(style: &stylo::ComputedValues
         )
 }
 
-/// Computed shaping intent at each owner side, independent of resolved box advances.
-///
-/// This is an unactivated prerequisite for ordinary inline box spacing. Activating it
-/// alone changes atom ownership and paint while the used advances are still missing.
-/// Construction therefore retains the alignment-only predicate above until placement,
-/// ownership, hits and editing can consume used edges together.
-#[allow(
-    dead_code,
-    reason = "requires integrated ordinary-inline used-edge placement"
-)]
+/// Computed shaping intent at each owner side (logical start, end), independent of resolved
+/// box advances. The caller gates this to standards mode.
 pub(crate) fn inline_span_shaping_boundaries(style: &stylo::ComputedValues) -> (bool, bool) {
     if inline_span_needs_shaping_boundaries(style) {
         return (true, true);
@@ -425,6 +418,164 @@ pub(crate) fn inline_span_box_shaping_boundaries(style: &stylo::ComputedValues) 
             || margin_boundary(margin.inline_end)
             || border_boundary(style.writing_mode.inline_end_physical_side()),
     )
+}
+
+/// The shaping boundaries an ordinary inline box requests when it is built: alignment
+/// boundaries, and box-side intent unless an edge value is unsupported (that box keeps its
+/// edge-less shaping and layout). The caller gates this to standards mode.
+pub(crate) fn inline_span_used_shaping_boundaries(style: &stylo::ComputedValues) -> (bool, bool) {
+    match inline_span_edges(style, 1.0).1 {
+        Some(INLINE_EDGE_PERCENTAGE | INLINE_EDGE_NEGATIVE)
+            if !inline_span_needs_shaping_boundaries(style) =>
+        {
+            (false, false)
+        }
+        _ => inline_span_shaping_boundaries(style),
+    }
+}
+
+/// Unsupported inputs of [`inline_span_edges`].
+pub(crate) const INLINE_EDGE_PERCENTAGE: &str = "a percentage, calc() or anchor-size horizontal margin or padding on an ordinary inline box (laid out as zero)";
+pub(crate) const INLINE_EDGE_NEGATIVE: &str =
+    "a negative horizontal margin on an ordinary inline box (laid out as zero)";
+pub(crate) const INLINE_EDGE_VERTICAL: &str =
+    "horizontal margin, border or padding on an ordinary inline box in a vertical writing mode";
+pub(crate) const INLINE_EDGE_RTL: &str = "inline-axis margin, border or padding on an ordinary inline box in right-to-left or bidirectional text";
+pub(crate) const INLINE_EDGE_QUIRKS: &str = "horizontal margin, border or padding on an ordinary inline box in quirks mode (laid out as zero)";
+pub(crate) const INLINE_EDGE_BORDER_PAINT: &str = "a non-solid or rounded border on an ordinary inline box with horizontal edges (painted solid and square)";
+pub(crate) const INLINE_EDGE_UNPLACED: &str = "horizontal margin, border or padding on an ordinary inline box with no adjacent text (an inline formatting context without text, or between atomic inline boxes; laid out as zero)";
+
+/// The used inline-axis margin, border and padding of an ordinary inline box, in layout units
+/// (`scale` times CSS pixels), and the first unsupported input among them (laid out as zero).
+///
+/// Fixed lengths are supported; `auto` margins are zero (CSS 2 § 10.3.1). Percentages, calc()
+/// and anchor functions, and negative margins are not supported.
+pub(crate) fn inline_span_edges(
+    style: &stylo::ComputedValues,
+    scale: f32,
+) -> (parley::InlineEdges, Option<&'static str>) {
+    use style::values::computed::length_percentage::Unpacked;
+    use style::values::generics::length::GenericMargin;
+
+    let mut unsupported = None;
+    let mut length = |value: &style::values::computed::LengthPercentage, margin: bool| -> f32 {
+        let (used, problem) = match value.unpack() {
+            Unpacked::Length(length) if length.px() < 0.0 && margin => {
+                (0.0, Some(INLINE_EDGE_NEGATIVE))
+            }
+            Unpacked::Length(length) => (length.px().max(0.0) * scale, None),
+            Unpacked::Percentage(percent) if percent.0 == 0.0 => (0.0, None),
+            Unpacked::Percentage(_) | Unpacked::Calc(_) => (0.0, Some(INLINE_EDGE_PERCENTAGE)),
+        };
+        if let Some(problem) = problem {
+            unsupported.get_or_insert(problem);
+        }
+        used
+    };
+    let padding = style.logical_padding();
+    let start_padding = length(padding.inline_start, false);
+    let end_padding = length(padding.inline_end, false);
+    let margin = style.logical_margin();
+    let mut anchored = false;
+    let mut margin_value = |margin: &style::values::computed::Margin| match margin {
+        GenericMargin::Auto => 0.0,
+        GenericMargin::LengthPercentage(value) => length(value, true),
+        GenericMargin::AnchorSizeFunction(_) | GenericMargin::AnchorContainingCalcFunction(_) => {
+            anchored = true;
+            0.0
+        }
+    };
+    let start_margin = margin_value(margin.inline_start);
+    let end_margin = margin_value(margin.inline_end);
+    if anchored {
+        unsupported.get_or_insert(INLINE_EDGE_PERCENTAGE);
+    }
+    let border = |side| {
+        use style::logical_geometry::PhysicalSide;
+        let (width, border_style) = match side {
+            PhysicalSide::Top => (
+                style.clone_border_top_width(),
+                style.clone_border_top_style(),
+            ),
+            PhysicalSide::Right => (
+                style.clone_border_right_width(),
+                style.clone_border_right_style(),
+            ),
+            PhysicalSide::Bottom => (
+                style.clone_border_bottom_width(),
+                style.clone_border_bottom_style(),
+            ),
+            PhysicalSide::Left => (
+                style.clone_border_left_width(),
+                style.clone_border_left_style(),
+            ),
+        };
+        if border_style.none_or_hidden() {
+            0.0
+        } else {
+            width.0.to_f32_px() * scale
+        }
+    };
+    // A box with an unsupported edge value keeps the edge-less layout as a whole, rather than
+    // a mix of its supported and unsupported edges.
+    if unsupported.is_some() {
+        return (parley::InlineEdges::ZERO, unsupported);
+    }
+    let edges = parley::InlineEdges {
+        start_margin,
+        start_border: border(style.writing_mode.inline_start_physical_side()),
+        start_padding,
+        end_padding,
+        end_border: border(style.writing_mode.inline_end_physical_side()),
+        end_margin,
+    };
+    if !edges.is_zero() && !style.writing_mode.is_horizontal() {
+        unsupported.get_or_insert(INLINE_EDGE_VERTICAL);
+    }
+    if !edges.is_zero() {
+        let border = style.get_border();
+        let painted = |border_style: style::values::computed::BorderStyle,
+                       width: &style::values::computed::BorderSideWidth| {
+            !border_style.none_or_hidden() && width.0.to_f32_px() != 0.0
+        };
+        let sides = [
+            (border.border_top_style, &border.border_top_width),
+            (border.border_right_style, &border.border_right_width),
+            (border.border_bottom_style, &border.border_bottom_width),
+            (border.border_left_style, &border.border_left_width),
+        ];
+        let non_solid = sides.iter().any(|(border_style, width)| {
+            painted(*border_style, width)
+                && *border_style != style::values::computed::BorderStyle::Solid
+        });
+        let rounded = [
+            &border.border_top_left_radius,
+            &border.border_top_right_radius,
+            &border.border_bottom_right_radius,
+            &border.border_bottom_left_radius,
+        ]
+        .iter()
+        .any(|radius| {
+            !style::Zero::is_zero(&radius.0.width.0) || !style::Zero::is_zero(&radius.0.height.0)
+        });
+        if non_solid || rounded {
+            unsupported.get_or_insert(INLINE_EDGE_BORDER_PAINT);
+        }
+    }
+    (edges, unsupported)
+}
+
+/// Whether any side of the box has an effective (visible style, nonzero width) border.
+pub(crate) fn inline_span_has_effective_border(style: &stylo::ComputedValues) -> bool {
+    let border = style.get_border();
+    [
+        (border.border_top_style, &border.border_top_width),
+        (border.border_right_style, &border.border_right_width),
+        (border.border_bottom_style, &border.border_bottom_width),
+        (border.border_left_style, &border.border_left_width),
+    ]
+    .iter()
+    .any(|(border_style, width)| !border_style.none_or_hidden() && width.0.to_f32_px() != 0.0)
 }
 
 /// Map the css-inline-3 `alignment-baseline` and `baseline-shift` longhands (which Stylo

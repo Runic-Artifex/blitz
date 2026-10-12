@@ -401,6 +401,9 @@ pub struct BaseDocument {
     pub(crate) iframe_loads: HashMap<NodeId, crate::iframe::IframeLoad>,
     /// Set of changed nodes for updating the accessibility tree
     pub(crate) changed_nodes: HashSet<NodeId>,
+    /// Layout inputs found outside the supported domain since the last
+    /// [`BaseDocument::take_unsupported_layout_reports`], in first-seen order.
+    pub(crate) unsupported_layout_reports: Vec<&'static str>,
     /// Set of changed nodes for updating the accessibility tree
     pub(crate) deferred_construction_nodes: Vec<ConstructionTask>,
 
@@ -573,6 +576,7 @@ impl BaseDocument {
             pending_resource_deallocations: Vec::new(),
 
             changed_nodes: HashSet::new(),
+            unsupported_layout_reports: Vec::new(),
             deferred_construction_nodes: Vec::new(),
             image_cache: HashMap::new(),
             pending_images: HashMap::new(),
@@ -2194,6 +2198,20 @@ impl BaseDocument {
     /// insertion leaves the containing document's mode unchanged. This carries
     /// Stylo's mode through matching and cascade; it does not claim support for
     /// every legacy CSS parsing behavior.
+    /// Take the descriptions of layout inputs that layout could not honour (each reported
+    /// once per occurrence kind until taken), for example nonzero horizontal edges of ordinary
+    /// inline boxes outside the supported domain. Such inputs are laid out without the
+    /// unsupported part.
+    pub fn take_unsupported_layout_reports(&mut self) -> Vec<&'static str> {
+        core::mem::take(&mut self.unsupported_layout_reports)
+    }
+
+    pub(crate) fn report_unsupported_layout(&mut self, what: &'static str) {
+        if !self.unsupported_layout_reports.contains(&what) {
+            self.unsupported_layout_reports.push(what);
+        }
+    }
+
     pub fn quirks_mode(&self) -> QuirksMode {
         self.nodes.quirks_mode()
     }
@@ -4108,5 +4126,146 @@ mod ordinary_span_ownership_cssom_tests {
         let owner = one_rect(&doc, inner);
         assert!(whole.width > 0.0);
         assert_eq!(owner, whole);
+    }
+}
+
+#[cfg(test)]
+mod inline_edge_tests {
+    use super::*;
+    use crate::stylo_to_parley::{INLINE_EDGE_PERCENTAGE, INLINE_EDGE_QUIRKS};
+    use crate::{Attribute, qual_name};
+    use blitz_traits::shell::ColorScheme;
+
+    fn attr(value: &str) -> Attribute {
+        Attribute {
+            name: qual_name!("style"),
+            value: value.into(),
+        }
+    }
+
+    /// `<div>a<span id=owner>b</span><span id=tail>c</span></div>`.
+    fn document(owner_style: &str, quirks: bool) -> (BaseDocument, NodeId, NodeId) {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        doc.set_quirks_mode(if quirks {
+            QuirksMode::Quirks
+        } else {
+            QuirksMode::NoQuirks
+        });
+        // The crate's bullet font gives real metrics without system fonts.
+        doc.load_resource(crate::net::ResourceLoadResponse {
+            request_id: 0,
+            node_id: None,
+            resolved_url: Some("test://inline-edge-font".into()),
+            result: Ok(crate::net::Resource::Font(
+                blitz_traits::net::Bytes::from_static(crate::BULLET_FONT),
+                crate::net::FontFaceOverrides {
+                    family_name: Some("EdgeTest".into()),
+                    ..Default::default()
+                },
+            )),
+        });
+        let root = doc.root_node().id;
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![attr("display:block")]);
+        let body = mutator.create_element(qual_name!("body"), vec![attr("display:block;margin:0")]);
+        let parent = mutator.create_element(
+            qual_name!("div"),
+            vec![attr(
+                "display:block;font-family:EdgeTest;font-size:20px;line-height:30px",
+            )],
+        );
+        let lead = mutator.create_text_node("\u{2022}");
+        let owner = mutator.create_element(qual_name!("span"), vec![attr(owner_style)]);
+        let owner_text = mutator.create_text_node("\u{2022}");
+        let tail = mutator.create_element(qual_name!("span"), vec![]);
+        let tail_text = mutator.create_text_node("\u{2022}");
+        mutator.append_children(owner, &[owner_text]);
+        mutator.append_children(tail, &[tail_text]);
+        mutator.append_children(parent, &[lead, owner, tail]);
+        mutator.append_children(body, &[parent]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+        (doc, owner, tail)
+    }
+
+    fn rect(doc: &BaseDocument, node: NodeId) -> BoundingRect {
+        let rects = doc.node_client_rects(node);
+        assert_eq!(rects.len(), 1, "{rects:?}");
+        rects[0]
+    }
+
+    fn close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 0.02,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn fixed_edges_widen_the_border_box_and_exclude_margins() {
+        let (mut plain_doc, owner, tail) = document("", false);
+        let plain = rect(&plain_doc, owner);
+        let plain_tail = rect(&plain_doc, tail);
+        assert!(plain_doc.take_unsupported_layout_reports().is_empty());
+
+        let style = "margin:0 7px 0 3px;padding:0 4px;border-left:2px solid red";
+        let (mut doc, owner, tail) = document(style, false);
+        let edged = rect(&doc, owner);
+        close(edged.x, plain.x + 3.0);
+        close(edged.width, plain.width + 2.0 + 4.0 + 4.0);
+        close(
+            rect(&doc, tail).x,
+            plain_tail.x + 3.0 + 2.0 + 4.0 + 4.0 + 7.0,
+        );
+        assert!(doc.take_unsupported_layout_reports().is_empty());
+    }
+
+    #[test]
+    fn edge_mutation_relayouts_without_rebuilding() {
+        let (mut doc, owner, tail) = document("", false);
+        let before = rect(&doc, tail);
+        doc.mutate()
+            .set_attribute(owner, qual_name!("style"), "margin-right:9px");
+        doc.resolve(0.0);
+        close(rect(&doc, tail).x, before.x + 9.0);
+        doc.mutate().set_attribute(owner, qual_name!("style"), "");
+        doc.resolve(0.0);
+        close(rect(&doc, tail).x, before.x);
+    }
+
+    #[test]
+    fn percentage_edges_are_reported_and_laid_out_as_zero() {
+        let (plain_doc, owner, _) = document("", false);
+        let plain = rect(&plain_doc, owner);
+        let (mut doc, owner, _) = document("padding:0 10%", false);
+        assert_eq!(rect(&doc, owner), plain);
+        assert_eq!(
+            doc.take_unsupported_layout_reports(),
+            vec![INLINE_EDGE_PERCENTAGE]
+        );
+        // The supported edges of a box with an unsupported one are not applied either.
+        let (mut doc, owner, _) = document(
+            "margin:0 -3px 0 0;padding:0 4px;border-left:2px solid red",
+            false,
+        );
+        assert_eq!(rect(&doc, owner), plain);
+        assert_eq!(
+            doc.take_unsupported_layout_reports(),
+            vec![crate::stylo_to_parley::INLINE_EDGE_NEGATIVE]
+        );
+    }
+
+    #[test]
+    fn quirks_mode_edges_are_reported() {
+        let (mut doc, _, _) = document("padding:0 4px", true);
+        assert_eq!(
+            doc.take_unsupported_layout_reports(),
+            vec![INLINE_EDGE_QUIRKS]
+        );
     }
 }

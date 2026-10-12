@@ -22,6 +22,34 @@ impl TextLayout {
             if !self.line_may_intersect(line, root, location) {
                 continue;
             }
+            // Own border and padding areas of inline boxes contain no descendant content;
+            // deeper spans come later in style order.
+            for (style_index, style) in self.layout.styles().iter().enumerate().rev() {
+                let owner = style.brush.id;
+                if owner == root.id || !eligible(root.with(owner)) {
+                    continue;
+                }
+                let extents = line.inline_edge_extents(style_index);
+                if extents.is_empty() {
+                    continue;
+                }
+                let Some((top, bottom)) = self.span_block_bounds(line, root.with(owner), root)
+                else {
+                    continue;
+                };
+                for (x0, x1) in extents {
+                    let rect = Rect::new(
+                        f64::from(x0) / scale,
+                        f64::from(top) / scale,
+                        f64::from(x1) / scale,
+                        f64::from(bottom) / scale,
+                    );
+                    // Snapped like the text fragments beside them.
+                    if location.intersects_snapped_rect(rect) {
+                        return Some(owner);
+                    }
+                }
+            }
             let mut fragments: Vec<Fragment> = Vec::new();
             for item in line.items() {
                 match item {
@@ -60,6 +88,7 @@ impl TextLayout {
                             let mut source_byte = first.text_range().start;
                             let mut advance = first.advance();
                             let mut continuation = first.is_ligature_continuation();
+                            let (left_edge, mut right_edge) = first.inline_edge_insets();
                             while clusters.peek().is_some_and(|next| {
                                 if run.run().is_rtl() {
                                     continuation
@@ -71,10 +100,11 @@ impl TextLayout {
                                 source_byte = source_byte.min(cluster.text_range().start);
                                 advance += cluster.advance();
                                 continuation = cluster.is_ligature_continuation();
+                                right_edge = cluster.inline_edge_insets().1;
                             }
                             let next = offset + advance;
-                            let x0 = offset.max(start);
-                            let x1 = next.min(end);
+                            let x0 = (offset + left_edge).max(start);
+                            let x1 = (next - right_edge).min(end);
                             let object = self.text_source(source_byte).unwrap_or(owner);
                             if x0 < x1 {
                                 // Keep shaping atoms intact, including multi-grapheme ligatures.
