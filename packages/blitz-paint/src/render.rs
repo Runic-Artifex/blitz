@@ -371,6 +371,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             decoration_transform,
             custom_widget_scene,
         );
+        let mut fieldset = cx.fieldset_decorations();
 
         // If this element clips its overflow it establishes a scrollport: narrow the clip
         // rectangle passed to descendants to the visible (clipped) region so that content
@@ -420,7 +421,9 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // effect layer when there is one.
         let decorations_in_effect_layer = has_opacity || filter.is_some();
         if !decorations_in_effect_layer {
+            cx.swap_fieldset_frame(&mut fieldset);
             cx.draw_outset_box_shadow(scene);
+            cx.swap_fieldset_frame(&mut fieldset);
         }
 
         // clip-path clip ayer
@@ -492,7 +495,9 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                     layer_backdrop,
                     |scene| {
                         if decorations_in_effect_layer {
+                            cx.swap_fieldset_frame(&mut fieldset);
                             cx.draw_outset_box_shadow(scene);
+                            cx.swap_fieldset_frame(&mut fieldset);
                         }
                         if own_backdrop.is_some() {
                             self.layer_manager.maybe_with_layer(
@@ -506,12 +511,27 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                                 |_| {},
                             );
                         }
+                        cx.swap_fieldset_frame(&mut fieldset);
                         cx.draw_background(scene);
                         cx.draw_inset_box_shadow(scene);
                         cx.draw_table_row_backgrounds(scene);
                         cx.draw_table_cell_backgrounds(scene);
                         cx.draw_table_borders(scene);
+                        // A fieldset's border is not painted behind its legend.
+                        let no_clip = kurbo::BezPath::new();
+                        let border_clip = fieldset.as_ref().map(|f| &f.border_clip);
+                        let border_clipped = self.layer_manager.maybe_push_layer(
+                            scene,
+                            border_clip.is_some(),
+                            1.0,
+                            cx.transform,
+                            border_clip.unwrap_or(&no_clip),
+                            None,
+                            None,
+                        );
                         cx.draw_border(scene);
+                        self.layer_manager.maybe_pop_layer(scene, border_clipped);
+                        cx.swap_fieldset_frame(&mut fieldset);
                         cx.stroke_devtools(scene);
 
                         // TODO: allow layers with opacity to be unclipped (overflow: visible)
@@ -691,12 +711,102 @@ struct ElementCx<'dom, 'a> {
     custom_widget_scene: Option<&'a Scene>,
 }
 
+/// The box decorations of a `<fieldset>` with a rendered legend
+/// (<https://html.spec.whatwg.org/multipage/rendering.html#the-fieldset-and-legend-elements>),
+/// as Chromium's `FieldsetPainter` paints them: shadows, background and
+/// border are painted in the border box shortened at the top by half the
+/// height the legend's border box exceeds the block-start border by, so that
+/// the border runs through the legend's centre, and the border is clipped
+/// out behind the legend (its border box horizontally, snapped to device
+/// pixels, through the whole border thickness).
+struct FieldsetDecorations {
+    frame: CssBox,
+    border_clip: kurbo::BezPath,
+}
+
+/// The part of a fieldset's border not painted behind its legend, in device
+/// pixels relative to the fieldset's border box: the legend's border box
+/// (`legend`, CSS pixels) horizontally, from the top through `border_bottom`
+/// (the block-end edge of the painted block-start border) or the legend's
+/// block end, whichever is lower. Its edges are snapped to device pixels
+/// (`origin`: the device offset of the border box) as Chromium snaps them.
+fn fieldset_border_cutout(
+    legend: Rect,
+    border_bottom: f64,
+    scale: f64,
+    origin: (f64, f64),
+) -> Rect {
+    let snap = |v: f64, t: f64| (v * scale + t).round() - t;
+    Rect::new(
+        snap(legend.x0, origin.0),
+        snap(0.0, origin.1),
+        snap(legend.x1, origin.0),
+        snap(legend.y1.max(border_bottom), origin.1),
+    )
+}
+
 /// Converts parley BoundingBox into peniko Rect
 fn convert_rect(rect: &parley::BoundingBox) -> kurbo::Rect {
     peniko::kurbo::Rect::new(rect.x0, rect.y0, rect.x1, rect.y1)
 }
 
 impl ElementCx<'_, '_> {
+    fn fieldset_decorations(&self) -> Option<FieldsetDecorations> {
+        let legend_id = self.node.rendered_legend()?;
+        let legend = self.context.dom.as_ref().tree().get(legend_id)?;
+        let legend_layout = *legend.final_layout();
+        let layout = *self.node.final_layout();
+        let scale = self.scale;
+        let border_top = layout.border.top as f64;
+        let legend_height = legend_layout.size.height as f64;
+        let outset = ((legend_height - border_top) / 2.0).max(0.0);
+
+        let mut decoration_layout = layout;
+        decoration_layout.size.height = (layout.size.height as f64 - outset).max(0.0) as f32;
+        let mut frame = create_css_rect(&self.style, &decoration_layout, scale);
+        let shift = Vec2::new(0.0, outset * scale);
+        frame.border_box = frame.border_box + shift;
+        frame.padding_box = frame.padding_box + shift;
+        frame.content_box = frame.content_box + shift;
+        frame.outline_box = frame.outline_box + shift;
+
+        let [_, _, _, _, tx, ty] = self.transform.as_coeffs();
+        let legend_rect = Rect::new(
+            legend_layout.location.x as f64,
+            legend_layout.location.y as f64,
+            (legend_layout.location.x + legend_layout.size.width) as f64,
+            legend_layout.location.y as f64 + legend_height,
+        );
+        let cutout = fieldset_border_cutout(legend_rect, outset + border_top, scale, (tx, ty));
+        let outer = Rect::new(
+            0.0,
+            0.0,
+            layout.size.width as f64 * scale,
+            layout.size.height as f64 * scale,
+        );
+        let mut border_clip = kurbo::BezPath::new();
+        // The outer rectangle clockwise, the cutout anticlockwise: a hole
+        // under the non-zero rule.
+        border_clip.move_to((outer.x0, outer.y0));
+        border_clip.line_to((outer.x1, outer.y0));
+        border_clip.line_to((outer.x1, outer.y1));
+        border_clip.line_to((outer.x0, outer.y1));
+        border_clip.close_path();
+        border_clip.move_to((cutout.x0, cutout.y0));
+        border_clip.line_to((cutout.x0, cutout.y1));
+        border_clip.line_to((cutout.x1, cutout.y1));
+        border_clip.line_to((cutout.x1, cutout.y0));
+        border_clip.close_path();
+        Some(FieldsetDecorations { frame, border_clip })
+    }
+
+    /// Exchange the frame with a fieldset's decoration frame (and back).
+    fn swap_fieldset_frame(&mut self, fieldset: &mut Option<FieldsetDecorations>) {
+        if let Some(fieldset) = fieldset {
+            std::mem::swap(&mut self.frame, &mut fieldset.frame);
+        }
+    }
+
     /// Paint overlay scrollbar thumbs for scroll containers: `overflow:
     /// scroll`, or `auto` when the content overflows (never `hidden`/`clip`,
     /// which scroll only programmatically). Thumbs appear on scroll and fade
@@ -1320,4 +1430,34 @@ fn create_css_rect(style: &ComputedValues, layout: &Layout, scale: f64) -> CssBo
     };
 
     CssBox::new(border_box, border, padding, outline_width, border_radii)
+}
+
+#[cfg(test)]
+mod fieldset_tests {
+    use super::fieldset_border_cutout;
+    use kurbo::Rect;
+
+    #[test]
+    fn cutout_snaps_to_device_pixels() {
+        // Chromium 153: a legend at 24..81.39 (CSS = device pixels) leaves
+        // device pixels 24..=80 of the border unpainted and paints pixel 81.
+        let cutout =
+            fieldset_border_cutout(Rect::new(24.0, 0.0, 81.39, 18.0), 10.0, 1.0, (0.0, 0.0));
+        assert_eq!(cutout, Rect::new(24.0, 0.0, 81.0, 18.0));
+        // Snapped in device pixels after the box's offset, halves rounding
+        // up (82 + 12.5 snaps to 95; at scale 2, 0.5 + 25 snaps to 26).
+        let cutout =
+            fieldset_border_cutout(Rect::new(12.5, 0.0, 77.578, 18.0), 10.0, 1.0, (82.0, 36.0));
+        assert_eq!(cutout, Rect::new(13.0, 0.0, 78.0, 18.0));
+        let cutout =
+            fieldset_border_cutout(Rect::new(12.5, 0.0, 77.5, 18.0), 10.0, 2.0, (0.5, 0.0));
+        assert_eq!(cutout, Rect::new(25.5, 0.0, 155.5, 36.0));
+    }
+
+    #[test]
+    fn cutout_spans_a_thicker_border() {
+        // A small legend centred on a 10px border: the whole thickness.
+        let cutout = fieldset_border_cutout(Rect::new(12.0, 1.0, 40.0, 9.0), 10.0, 1.0, (0.0, 0.0));
+        assert_eq!(cutout, Rect::new(12.0, 0.0, 40.0, 10.0));
+    }
 }

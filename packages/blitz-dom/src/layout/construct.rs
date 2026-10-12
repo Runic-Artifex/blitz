@@ -419,7 +419,64 @@ pub(crate) fn collect_layout_children(
     container_node_id: NodeId,
     out: &mut LayoutChildren,
 ) {
-    collect_layout_children_with_wrap(doc, container_node_id, out, None)
+    collect_layout_children_with_wrap(doc, container_node_id, out, None);
+    let node = &doc.nodes[container_node_id];
+    if node.is_fieldset()
+        && node.display_style().is_some_and(|display| {
+            !matches!(
+                display.inside(),
+                DisplayInside::None | DisplayInside::Contents
+            )
+        })
+    {
+        move_rendered_legend_first(doc, container_node_id, out);
+    }
+}
+
+/// A fieldset's rendered legend: its first `<legend>` child that generates a
+/// box and is neither floated nor absolutely positioned
+/// (<https://html.spec.whatwg.org/multipage/rendering.html#the-fieldset-and-legend-elements>).
+/// When that legend is a layout child of the fieldset (a block-level box), it
+/// becomes the first one, which `layout::fieldset` places over the border
+/// outside the content the fieldset's `display` lays out
+/// (`NodeFlags::HAS_RENDERED_LEGEND`). Chromium blockifies a rendered legend
+/// whatever its `display`; an inline-level one stays in the content here.
+fn move_rendered_legend_first(
+    doc: &mut BaseDocument,
+    container_node_id: NodeId,
+    out: &mut LayoutChildren,
+) {
+    let container = &doc.nodes[container_node_id];
+    let legend = container.children.iter().copied().find(|&child_id| {
+        let child = &doc.nodes[child_id];
+        let is_legend = child
+            .data
+            .downcast_element()
+            .is_some_and(|el| el.name.local == local_name!("legend"));
+        is_legend
+            && child.primary_styles().is_some_and(|style| {
+                let display = style.clone_display();
+                !matches!(
+                    display.inside(),
+                    DisplayInside::None | DisplayInside::Contents
+                ) && !style.clone_float().is_floating()
+                    && !matches!(
+                        style.clone_position(),
+                        PositionProperty::Absolute | PositionProperty::Fixed
+                    )
+            })
+    });
+    let Some(legend) = legend else {
+        return;
+    };
+    let Some(index) = out.children.iter().position(|&id| id == legend) else {
+        return;
+    };
+    out.children.remove(index);
+    out.children.insert(0, legend);
+    doc.nodes[container_node_id]
+        .flags
+        .insert(NodeFlags::HAS_RENDERED_LEGEND);
 }
 
 fn collect_layout_children_with_wrap(

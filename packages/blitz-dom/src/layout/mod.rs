@@ -24,6 +24,7 @@ use taffy::{
 
 pub(crate) mod construct;
 pub(crate) mod damage;
+mod fieldset;
 pub(crate) mod inline;
 pub(crate) mod list;
 pub(crate) mod paint_tree;
@@ -668,36 +669,56 @@ impl BaseDocument {
                     return self.compute_inline_layout(dom_node_id(node_id), inputs, block_ctx);
                 }
 
-                let is_flow_button = node.is_flow_button();
-
-                // The default CSS file will set
-                match node.taffy_display() {
-                    Display::Block => compute_block_layout(self, node_id, inputs, block_ctx),
-                    Display::FlowRoot => compute_block_layout(self, node_id, inputs, None),
-                    Display::Flex if is_flow_button => {
-                        let mut output = compute_flexbox_layout(self, node_id, inputs);
-                        if inputs.run_mode == RunMode::PerformLayout {
-                            output.baselines = self.button_content_baselines(node_id);
-                        }
-                        output
-                    }
-                    Display::Flex => compute_flexbox_layout(self, node_id, inputs),
-                    Display::Grid => {
-                        let mut output = compute_grid_layout(self, node_id, inputs);
-                        if inputs.run_mode == RunMode::PerformLayout
-                            && output.baselines.first.is_some()
-                            && let Some(baseline) = self.grid_first_item_baseline(node_id)
-                        {
-                            output.baselines.first = Some(baseline);
-                        }
-                        output
-                    }
-                    Display::None => taffy::LayoutOutput::HIDDEN,
+                if let Some(legend) = node.rendered_legend() {
+                    return fieldset::compute_fieldset_layout(self, node_id, inputs, legend);
                 }
+
+                self.compute_display_layout(node_id, inputs, block_ctx)
             }
             NodeData::Document(_) => compute_block_layout(self, node_id, inputs, None),
 
             _ => taffy::LayoutOutput::HIDDEN,
+        }
+    }
+}
+
+impl BaseDocument {
+    /// Lay out an element's box with the algorithm of its `display`.
+    fn compute_display_layout(
+        &mut self,
+        node_id: NodeId,
+        inputs: taffy::tree::LayoutInput,
+        block_ctx: Option<&mut BlockContext<'_>>,
+    ) -> taffy::tree::LayoutOutput {
+        let node = &self.nodes[dom_node_id(node_id)];
+        let is_flow_button = node.is_flow_button();
+        let is_fieldset = node.is_fieldset();
+
+        // The default CSS file will set
+        match node.taffy_display() {
+            // A fieldset establishes a new block formatting context.
+            Display::Block if is_fieldset => compute_block_layout(self, node_id, inputs, None),
+            Display::Block => compute_block_layout(self, node_id, inputs, block_ctx),
+            Display::FlowRoot => compute_block_layout(self, node_id, inputs, None),
+            Display::Flex if is_flow_button => {
+                let mut output = compute_flexbox_layout(self, node_id, inputs);
+                if inputs.run_mode == RunMode::PerformLayout {
+                    output.baselines = self.button_content_baselines(node_id);
+                }
+                output
+            }
+            Display::Flex => compute_flexbox_layout(self, node_id, inputs),
+            Display::Grid => {
+                let mut output = compute_grid_layout(self, node_id, inputs);
+                if inputs.run_mode == RunMode::PerformLayout
+                    && output.baselines.first.is_some()
+                    && let Some(baseline) = self.grid_first_item_baseline(node_id)
+                {
+                    output.baselines.first = Some(baseline);
+                }
+                output
+            }
+            Display::None => taffy::LayoutOutput::HIDDEN,
         }
     }
 }

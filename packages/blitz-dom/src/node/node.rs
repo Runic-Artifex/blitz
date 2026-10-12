@@ -56,6 +56,9 @@ bitflags! {
         const IS_TABLE_ROOT = 0b00000010;
         /// Whether the node is "in the document" (~= has a parent and isn't a template node)
         const IS_IN_DOCUMENT = 0b00000100;
+        /// Whether the node is a `<fieldset>` with a rendered legend, which is
+        /// then its first layout child (`Node::rendered_legend`).
+        const HAS_RENDERED_LEGEND = 0b00001000;
     }
 }
 
@@ -78,6 +81,7 @@ impl NodeFlags {
     #[inline(always)]
     pub fn reset_construction_flags(&mut self) {
         self.remove(Self::IS_INLINE_ROOT);
+        self.remove(Self::HAS_RENDERED_LEGEND);
         self.remove(Self::IS_TABLE_ROOT);
     }
 }
@@ -97,6 +101,9 @@ pub struct Node {
     /// Used collapsed borders resolved by the table formatting context.
     pub table_cell_border: Cell<Option<taffy::Rect<f32>>>,
     pub table_cell_outer: Cell<taffy::Point<bool>>,
+    /// The border a `<fieldset>` lays its content out with while its rendered
+    /// legend is placed over its block-start border (`layout::fieldset`).
+    pub(crate) fieldset_content_border: Cell<Option<taffy::Rect<f32>>>,
     /// A separate child list that includes anonymous collections of inline elements
     pub layout_children: RefCell<Option<ThinVec<NodeId>>>,
     /// Out-of-flow (absolutely/fixed positioned) boxes for which this node is the
@@ -418,6 +425,7 @@ impl Node {
             layout_parent: Cell::new(None),
             table_cell_border: Cell::new(None),
             table_cell_outer: Cell::new(taffy::Point { x: false, y: false }),
+            fieldset_content_border: Cell::new(None),
             oof_containing_block: Cell::new(None),
             layout_children: RefCell::new(None),
             hoisted_children: RefCell::new(ThinVec::new()),
@@ -482,6 +490,30 @@ impl Node {
 
     pub(crate) fn display_style(&self) -> Option<StyloDisplay> {
         Some(self.primary_styles().as_ref()?.clone_display())
+    }
+
+    /// Whether this is a `<fieldset>` element.
+    pub(crate) fn is_fieldset(&self) -> bool {
+        self.data
+            .downcast_element()
+            .is_some_and(|el| el.name.local == local_name!("fieldset"))
+    }
+
+    /// The rendered legend of a `<fieldset>`: its first `<legend>` child that
+    /// is neither floated nor absolutely positioned
+    /// (<https://html.spec.whatwg.org/multipage/rendering.html#the-fieldset-and-legend-elements>).
+    /// It is the fieldset's first layout child, placed over the block-start
+    /// border outside the content the fieldset's `display` lays out.
+    pub fn rendered_legend(&self) -> Option<NodeId> {
+        if !self.flags.contains(NodeFlags::HAS_RENDERED_LEGEND) {
+            return None;
+        }
+        self.layout_children
+            .try_borrow()
+            .ok()?
+            .as_ref()?
+            .first()
+            .copied()
     }
 
     /// Whether this is a `<button>` element.
@@ -1201,7 +1233,7 @@ impl Node {
         stylo_taffy::TaffyStyloStyle::new(styles, flags).with_table_cell_border(if collapsed {
             self.table_cell_border.get()
         } else {
-            None
+            self.fieldset_content_border.get()
         })
     }
 
