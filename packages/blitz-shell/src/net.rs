@@ -48,24 +48,56 @@ mod data_uri_net_provider {
 
     impl NetProvider for DataUriNetProvider {
         fn fetch(&self, _doc_id: usize, request: Request, handler: Box<dyn NetHandler>) {
-            // let callback = &self.resource_callback;
-            match request.url.scheme() {
-                "data" => {
-                    let Ok(data_url) = DataUrl::process(request.url.as_str()) else {
-                        // callback.call(doc_id, Err(Some(String::from("Failed to parse data uri"))));
-                        return;
-                    };
-                    let Ok(decoded) = data_url.decode_to_vec() else {
-                        // callback.call(doc_id, Err(Some(String::from("Failed to decode data uri"))));
-                        return;
-                    };
-                    let bytes = Bytes::from(decoded.0);
-                    handler.bytes(request.url.to_string(), bytes);
-                }
-                _ => {
-                    // callback.call(doc_id, Err(Some(String::from("UnsupportedScheme"))));
-                }
-            };
+            let url = request.url.to_string();
+            match decode(&request) {
+                Ok(bytes) => handler.bytes(url, Bytes::from(bytes)),
+                Err(message) => handler.error(url, String::from(message)),
+            }
+        }
+    }
+
+    fn decode(request: &Request) -> Result<Vec<u8>, &'static str> {
+        if request.url.scheme() != "data" {
+            return Err("Unsupported scheme");
+        }
+        let data_url =
+            DataUrl::process(request.url.as_str()).map_err(|_| "Failed to parse data uri")?;
+        let (bytes, _) = data_url
+            .decode_to_vec()
+            .map_err(|_| "Failed to decode data uri")?;
+        Ok(bytes)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::Mutex;
+
+        /// The handler's completion: `Ok(bytes)` or `Err(message)`.
+        type Outcome = Arc<Mutex<Option<Result<Vec<u8>, String>>>>;
+
+        struct Recorder(Outcome);
+        impl NetHandler for Recorder {
+            fn bytes(self: Box<Self>, _url: String, bytes: Bytes) {
+                *self.0.lock().unwrap() = Some(Ok(bytes.to_vec()));
+            }
+            fn error(self: Box<Self>, _url: String, message: String) {
+                *self.0.lock().unwrap() = Some(Err(message));
+            }
+        }
+
+        fn fetch(url: &str) -> Option<Result<Vec<u8>, String>> {
+            let outcome = Outcome::default();
+            let request = Request::get(blitz_traits::net::Url::parse(url).unwrap());
+            DataUriNetProvider::new(None).fetch(0, request, Box::new(Recorder(outcome.clone())));
+            outcome.lock().unwrap().take()
+        }
+
+        #[test]
+        fn completes_every_request() {
+            assert_eq!(fetch("data:text/plain,abc"), Some(Ok(b"abc".to_vec())));
+            assert!(matches!(fetch("data:;base64,%%%"), Some(Err(_))));
+            assert!(matches!(fetch("https://example.com/a.png"), Some(Err(_))));
         }
     }
 }

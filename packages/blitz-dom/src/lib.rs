@@ -50,6 +50,8 @@ mod hit_geometry;
 mod html;
 /// Loading of `<iframe>` elements into sub-documents.
 mod iframe;
+#[cfg(test)]
+mod image_load_event_tests;
 /// Integration of taffy and the DOM.
 mod layout;
 mod mutator;
@@ -97,7 +99,7 @@ pub use blitz_traits::node_id::NodeId;
 pub use config::{DocumentConfig, StyleThreading};
 pub use document::{
     AnimationPhase, AnimationSnapshot, BaseDocument, BoundingRect, DocGuard, DocGuardMut, Document,
-    PlainDocument,
+    ImageLoadEvent, ImageLoadEventKind, PlainDocument,
 };
 pub use markup5ever::{
     LocalName, Namespace, NamespaceStaticSet, Prefix, PrefixStaticSet, QualName, local_name,

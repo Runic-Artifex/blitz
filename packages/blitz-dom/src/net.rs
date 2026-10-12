@@ -141,6 +141,10 @@ pub struct StylesheetHandler {
 }
 
 impl NetHandler for ResourceHandler<StylesheetHandler> {
+    fn error(self: Box<Self>, url: String, message: String) {
+        self.respond(url, Err(message))
+    }
+
     fn bytes(self: Box<Self>, resolved_url: String, bytes: Bytes) {
         let Ok(css) = std::str::from_utf8(&bytes) else {
             return self.respond(resolved_url, Err(String::from("Invalid UTF8")));
@@ -258,6 +262,10 @@ struct NestedStylesheetHandler {
 }
 
 impl NetHandler for ResourceHandler<NestedStylesheetHandler> {
+    fn error(self: Box<Self>, url: String, message: String) {
+        self.respond(url, Err(message))
+    }
+
     fn bytes(self: Box<Self>, resolved_url: String, bytes: Bytes) {
         let Ok(css) = std::str::from_utf8(&bytes) else {
             return self.respond(resolved_url, Err(String::from("Invalid UTF8")));
@@ -300,6 +308,10 @@ struct FontFaceHandler {
     overrides: FontFaceOverrides,
 }
 impl NetHandler for ResourceHandler<FontFaceHandler> {
+    fn error(self: Box<Self>, url: String, message: String) {
+        self.respond(url, Err(message))
+    }
+
     fn bytes(mut self: Box<Self>, resolved_url: String, bytes: Bytes) {
         let result = self.data.parse(bytes);
         self.respond(resolved_url, result)
@@ -552,6 +564,10 @@ fn stylo_to_fontique_style(style: &FontStyleRange) -> parley::fontique::FontStyl
 pub(crate) struct DocumentSrcHandler;
 
 impl NetHandler for ResourceHandler<DocumentSrcHandler> {
+    fn error(self: Box<Self>, url: String, message: String) {
+        self.respond(url, Err(message))
+    }
+
     fn bytes(self: Box<Self>, resolved_url: String, bytes: Bytes) {
         let html = String::from_utf8_lossy(&bytes).into_owned();
         self.respond(resolved_url, Ok(Resource::DocumentSrc(html)));
@@ -560,17 +576,24 @@ impl NetHandler for ResourceHandler<DocumentSrcHandler> {
 
 pub struct ImageHandler {
     kind: ImageType,
+    /// The URL the request was made for, which keys the nodes waiting for
+    /// the image: the response is applied to them even if it was redirected.
+    url: String,
 }
 impl ImageHandler {
-    pub fn new(kind: ImageType) -> Self {
-        Self { kind }
+    pub fn new(kind: ImageType, url: String) -> Self {
+        Self { kind, url }
     }
 }
 
 impl NetHandler for ResourceHandler<ImageHandler> {
-    fn bytes(self: Box<Self>, resolved_url: String, bytes: Bytes) {
+    fn bytes(self: Box<Self>, _resolved_url: String, bytes: Bytes) {
         let result = self.data.parse(bytes);
-        self.respond(resolved_url, result)
+        self.respond(self.data.url.clone(), result)
+    }
+
+    fn error(self: Box<Self>, _url: String, message: String) {
+        self.respond(self.data.url.clone(), Err(message))
     }
 }
 

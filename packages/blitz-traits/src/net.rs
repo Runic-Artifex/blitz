@@ -31,8 +31,23 @@ pub trait NetProvider: Send + Sync + 'static {
 
 /// A type that parses raw bytes from a network request into a Data and then calls
 /// the NetCallack with the result.
+///
+/// A [`NetProvider`] completes each request by calling exactly one of
+/// [`bytes`](NetHandler::bytes) (the response body) or
+/// [`error`](NetHandler::error) (the request failed).
 pub trait NetHandler: Send + Sync + 'static {
     fn bytes(self: Box<Self>, resolved_url: String, bytes: Bytes);
+
+    /// The request for `url` failed without a response body to parse: a
+    /// network error, an HTTP error status, an aborted request, an
+    /// unsupported scheme or a malformed URL. `message` describes the
+    /// failure.
+    ///
+    /// The default implementation drops the handler, as providers that do
+    /// not report failures do.
+    fn error(self: Box<Self>, url: String, message: String) {
+        let _ = (url, message);
+    }
 }
 
 /// A callback which gets called every time a network request completes

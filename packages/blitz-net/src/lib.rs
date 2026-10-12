@@ -277,7 +277,6 @@ impl NetProvider for Provider {
 
         let waker = self.waker.clone();
         spawn(async move {
-            #[cfg(feature = "tracing")]
             let url = request.url.to_string();
 
             let signal = request.signal.take();
@@ -304,8 +303,7 @@ impl NetProvider for Provider {
                 Err(e) => {
                     #[cfg(feature = "tracing")]
                     tracing::error!(url = url.as_str(), error = ?e, "Error fetching");
-                    #[cfg(not(feature = "tracing"))]
-                    let _ = e;
+                    handler.error(url, e.to_string());
                 }
             };
         });

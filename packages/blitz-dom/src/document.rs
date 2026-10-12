@@ -265,6 +265,36 @@ impl Document for Rc<RefCell<BaseDocument>> {
     }
 }
 
+/// The outcome of an `<img>` element's image request: the DOM event the
+/// element fires for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageLoadEventKind {
+    /// The image was fetched and decoded (`load`).
+    Load,
+    /// The fetch or the decode failed, or `src` is empty or not a valid URL
+    /// (`error`).
+    Error,
+}
+
+impl ImageLoadEventKind {
+    /// The DOM event type: `"load"` or `"error"`.
+    pub fn event_type(self) -> &'static str {
+        match self {
+            Self::Load => "load",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// An `<img>` element's image request completed (see
+/// [`BaseDocument::take_image_load_events`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageLoadEvent {
+    /// The `<img>` element
+    pub node_id: NodeId,
+    pub kind: ImageLoadEventKind,
+}
+
 pub enum DocumentEvent {
     ResourceLoad(ResourceLoadResponse),
     /// A navigation originating from within an iframe's sub-document
@@ -423,6 +453,13 @@ pub struct BaseDocument {
     /// Value is a list of (node_id, image_type) pairs waiting for the image.
     pub(crate) pending_images: HashMap<String, Vec<(NodeId, ImageType)>>,
 
+    /// The `src` value each `<img>` element last requested its image for.
+    pub(crate) image_request_srcs: HashMap<NodeId, String>,
+
+    /// Outcomes of `<img>` elements' image requests not yet taken with
+    /// [`BaseDocument::take_image_load_events`], in the order they were determined.
+    pub(crate) image_load_events: Vec<ImageLoadEvent>,
+
     /// Nodes whose `background-image`/`mask-image` layers need flushing to
     /// dedicated storage on the node because their style changed (populated by
     /// the style traversal and by pseudo-element box construction).
@@ -580,6 +617,8 @@ impl BaseDocument {
             deferred_construction_nodes: Vec::new(),
             image_cache: HashMap::new(),
             pending_images: HashMap::new(),
+            image_request_srcs: HashMap::new(),
+            image_load_events: Vec::new(),
             pending_style_image_nodes: Vec::new(),
             pending_critical_resources: HashSet::new(),
             controls_to_form: HashMap::new(),
@@ -957,6 +996,10 @@ impl BaseDocument {
     /// it so that stale NodeIds are never dereferenced after the slot is freed.
     pub(crate) fn remove_node_from_tree(&mut self, node_id: NodeId) -> Option<Node> {
         self.clear_interaction_state_for_removed_node(node_id);
+        if self.image_request_srcs.remove(&node_id).is_some() {
+            self.image_load_events
+                .retain(|event| event.node_id != node_id);
+        }
         self.nodes.remove(node_id)
     }
 
@@ -1362,7 +1405,12 @@ impl BaseDocument {
                         "Resource load failed"
                     );
                     #[cfg(not(feature = "tracing"))]
-                    let _ = (waiting_nodes, err);
+                    let _ = err;
+                    for (node_id, image_type) in waiting_nodes {
+                        if matches!(image_type, ImageType::Image) {
+                            self.fail_image_request(node_id);
+                        }
+                    }
                 } else {
                     #[cfg(feature = "tracing")]
                     tracing::warn!(error = err.as_str(), "Resource load failed (no url)");
@@ -1493,6 +1541,11 @@ impl BaseDocument {
                     // Clear layout cache
                     node.clear_layout_cache();
                     node.insert_damage(ALL_DAMAGE);
+
+                    self.image_load_events.push(ImageLoadEvent {
+                        node_id,
+                        kind: ImageLoadEventKind::Load,
+                    });
                 }
                 ImageType::Background(idx) | ImageType::Mask(idx) => {
                     let layer_image = node.element_data_mut().and_then(|el| {
@@ -2204,6 +2257,57 @@ impl BaseDocument {
     /// unsupported part.
     pub fn take_unsupported_layout_reports(&mut self) -> Vec<&'static str> {
         core::mem::take(&mut self.unsupported_layout_reports)
+    }
+
+    /// Take the outcomes of `<img>` elements' image requests determined since the last
+    /// call, in the order they were determined. Each is the `load` or `error` event the
+    /// element fires; Blitz does not dispatch them. The HTML standard fires them from a
+    /// task queued once the outcome is known, so an embedder dispatches them after the
+    /// task that determined them, in order.
+    ///
+    /// - A request for an image the document has already loaded completes with `load`
+    ///   when the element's `src` is set (or the element is inserted), as does an empty
+    ///   or unparsable `src`, with `error`.
+    /// - Otherwise the outcome is determined when the document processes the response
+    ///   ([`BaseDocument::handle_messages`], which [`BaseDocument::resolve`] also
+    ///   calls): `load` once the image is decoded and applied to the element (its
+    ///   intrinsic size is known), `error` if the fetch or the decode failed.
+    /// - Setting `src` starts a new request even if the value is unchanged. Setting or
+    ///   removing `src` drops the element's outcome not yet taken, and the outcome of
+    ///   its earlier request is never recorded or applied. Inserting an element requests
+    ///   its image only if its `src` changed since its last request (or it has none
+    ///   yet), and removing an element from the document does not cancel its request.
+    pub fn take_image_load_events(&mut self) -> Vec<ImageLoadEvent> {
+        core::mem::take(&mut self.image_load_events)
+    }
+
+    /// Abandon `<img>` element `node_id`'s image request: the response to it is no longer
+    /// applied to the element, and its outcome is no longer reported.
+    pub(crate) fn cancel_image_request(&mut self, node_id: NodeId) {
+        for waiting in self.pending_images.values_mut() {
+            waiting.retain(|(id, kind)| !(*id == node_id && matches!(kind, ImageType::Image)));
+        }
+        self.image_load_events
+            .retain(|event| event.node_id != node_id);
+    }
+
+    /// `<img>` element `node_id`'s image request failed: it no longer shows an image
+    /// and fires `error`.
+    pub(crate) fn fail_image_request(&mut self, node_id: NodeId) {
+        let Some(node) = self.get_node_mut(node_id) else {
+            return;
+        };
+        if let Some(element) = node.element_data_mut()
+            && matches!(element.special_data, SpecialElementData::Image(_))
+        {
+            element.special_data = SpecialElementData::None;
+            node.clear_layout_cache();
+            node.insert_damage(ALL_DAMAGE);
+        }
+        self.image_load_events.push(ImageLoadEvent {
+            node_id,
+            kind: ImageLoadEventKind::Error,
+        });
     }
 
     pub(crate) fn report_unsupported_layout(&mut self, what: &'static str) {

@@ -9,7 +9,8 @@ use crate::node::{CanvasData, NodeFlags, SpecialElementData};
 use crate::stylo_device::DeviceChanges;
 use crate::util::ImageType;
 use crate::{
-    Attribute, BaseDocument, Document, ElementData, Node, NodeData, QualName, local_name, qual_name,
+    Attribute, BaseDocument, Document, ElementData, ImageLoadEvent, ImageLoadEventKind, Node,
+    NodeData, QualName, local_name, qual_name,
 };
 use blitz_traits::shell::Viewport;
 use style::Atom;
@@ -378,13 +379,19 @@ impl DocumentMutator<'_> {
         // If node if not in the document, then don't apply any special behaviours
         // and simply set the attribute value
         if !node.flags.is_in_document() {
+            // An `<img>` outside the document requests its image when inserted; its
+            // earlier request is abandoned now.
+            if (tag, attr) == tag_and_attr!("img", "src") {
+                self.doc.cancel_image_request(node_id);
+                self.doc.image_request_srcs.remove(&node_id);
+            }
             return;
         }
 
         if (tag, attr) == tag_and_attr!("input", "checked") {
             set_input_checked_state(element, value.to_string());
         } else if (tag, attr) == tag_and_attr!("img", "src") {
-            self.load_image(node_id);
+            self.load_image(node_id, true);
         } else if (tag, attr) == tag_and_attr!("canvas", "src") {
             self.load_custom_paint_src(node_id);
         } else if (tag, attr) == tag_and_attr!("link", "href")
@@ -492,6 +499,10 @@ impl DocumentMutator<'_> {
             self.recompute_is_animating = true;
         } else if (tag, attr) == tag_and_attr!("link", "href") {
             self.unload_stylesheet(node_id);
+        } else if (tag, attr) == tag_and_attr!("img", "src") {
+            // Without `src` the element requests no image, and fires no event.
+            self.doc.cancel_image_request(node_id);
+            self.doc.image_request_srcs.remove(&node_id);
         } else if (tag, attr) == tag_and_attr!("iframe", "srcdoc") && node_is_in_document {
             // Fall back to loading from the `src` attribute (if any)
             self.load_iframe(node_id);
@@ -914,7 +925,7 @@ impl<'doc> DocumentMutator<'doc> {
         let mut ops = mem::take(&mut self.eager_op_queue);
         for op in ops.drain(0..) {
             match op {
-                SpecialOp::LoadImage(node_id) => self.load_image(node_id),
+                SpecialOp::LoadImage(node_id) => self.load_image(node_id, false),
                 SpecialOp::LoadIframe(node_id) => self.load_iframe(node_id),
                 SpecialOp::LoadStylesheet(node_id) => self.load_linked_stylesheet(node_id),
                 SpecialOp::UnloadStylesheet(node_id) => self.unload_stylesheet(node_id),
@@ -1141,53 +1152,80 @@ impl<'doc> DocumentMutator<'doc> {
         self.doc.stylesheet_generation += 1;
     }
 
-    fn load_image(&mut self, target_id: NodeId) {
+    /// Request the image of `<img>` element `target_id` for its `src`, abandoning its
+    /// earlier request (see [`BaseDocument::take_image_load_events`]). `src_set`: its
+    /// `src` was set; otherwise it was inserted into the document, and requests its
+    /// image only if its `src` changed since its last request.
+    fn load_image(&mut self, target_id: NodeId, src_set: bool) {
         let node = &self.doc.nodes[target_id];
-        if let Some(raw_src) = node.attr(local_name!("src")) {
-            if !raw_src.is_empty() {
-                let src = self.doc.resolve_url(raw_src);
-                let src_string = src.as_str();
-
-                // Check cache first
-                if let Some(cached_image) = self.doc.image_cache.get(src_string) {
-                    #[cfg(feature = "tracing")]
-                    tracing::info!("Loading image {src_string} from cache");
-                    let node = &mut self.doc.nodes[target_id];
-                    node.element_data_mut().unwrap().special_data =
-                        SpecialElementData::Image(Box::new(cached_image.clone()));
-                    node.clear_layout_cache();
-                    node.insert_damage(ALL_DAMAGE);
-                    return;
-                }
-
-                // Check if there's already a pending request for this URL
-                if let Some(waiting_list) = self.doc.pending_images.get_mut(src_string) {
-                    #[cfg(feature = "tracing")]
-                    tracing::info!("Image {src_string} already pending, queueing node {target_id}");
-                    waiting_list.push((target_id, ImageType::Image));
-                    return;
-                }
-
-                // Start fetch and track as pending
-                #[cfg(feature = "tracing")]
-                tracing::info!("Fetching image {src_string}");
-                self.doc
-                    .pending_images
-                    .insert(src_string.to_string(), vec![(target_id, ImageType::Image)]);
-
-                self.doc.net_provider.fetch(
-                    self.doc.id(),
-                    self.doc.build_request(src),
-                    ResourceHandler::boxed(
-                        self.doc.tx.clone(),
-                        self.doc.id(),
-                        None, // Don't pass node_id, we'll handle it via pending_images
-                        self.doc.shell_provider.clone(),
-                        ImageHandler::new(ImageType::Image),
-                    ),
-                );
-            }
+        let Some(raw_src) = node.attr(local_name!("src")) else {
+            return;
+        };
+        if !src_set
+            && self
+                .doc
+                .image_request_srcs
+                .get(&target_id)
+                .is_some_and(|requested| requested == raw_src)
+        {
+            return;
         }
+        let raw_src = raw_src.to_string();
+        self.doc.cancel_image_request(target_id);
+        let src = match raw_src.as_str() {
+            "" => None,
+            raw_src => self.doc.url.resolve_relative(raw_src),
+        };
+        self.doc.image_request_srcs.insert(target_id, raw_src);
+        let Some(src) = src else {
+            self.doc.fail_image_request(target_id);
+            return;
+        };
+        let src_string = src.as_str();
+
+        // Check cache first
+        if let Some(cached_image) = self.doc.image_cache.get(src_string) {
+            #[cfg(feature = "tracing")]
+            tracing::info!("Loading image {src_string} from cache");
+            let node = &mut self.doc.nodes[target_id];
+            node.element_data_mut().unwrap().special_data =
+                SpecialElementData::Image(Box::new(cached_image.clone()));
+            node.clear_layout_cache();
+            node.insert_damage(ALL_DAMAGE);
+            self.doc.image_load_events.push(ImageLoadEvent {
+                node_id: target_id,
+                kind: ImageLoadEventKind::Load,
+            });
+            return;
+        }
+
+        // Check if there's already a pending request for this URL
+        if let Some(waiting_list) = self.doc.pending_images.get_mut(src_string) {
+            #[cfg(feature = "tracing")]
+            tracing::info!("Image {src_string} already pending, queueing node {target_id}");
+            waiting_list.push((target_id, ImageType::Image));
+            return;
+        }
+
+        // Start fetch and track as pending
+        #[cfg(feature = "tracing")]
+        tracing::info!("Fetching image {src_string}");
+        self.doc
+            .pending_images
+            .insert(src_string.to_string(), vec![(target_id, ImageType::Image)]);
+
+        let handler = ImageHandler::new(ImageType::Image, src_string.to_string());
+        self.doc.net_provider.fetch(
+            self.doc.id(),
+            self.doc.build_request(src),
+            ResourceHandler::boxed(
+                self.doc.tx.clone(),
+                self.doc.id(),
+                None, // Don't pass node_id, we'll handle it via pending_images
+                self.doc.shell_provider.clone(),
+                handler,
+            ),
+        );
     }
 
     fn load_iframe(&mut self, target_id: NodeId) {

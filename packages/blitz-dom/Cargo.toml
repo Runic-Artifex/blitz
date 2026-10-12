@@ -94,6 +94,10 @@ thread_local = { workspace = true }
 # WASM
 web-time = { workspace = true }
 
+[dev-dependencies]
+# PNG encoding and decoding for the image load tests
+image = { workspace = true, features = ["png"] }
+
 # HACK: Blitz doesn't need to depend on objc2 directly. But this feature flag is necessary
 # to prevent debug builds from panicking.
 [target.'cfg(any(target_vendor = "apple"))'.dependencies]
