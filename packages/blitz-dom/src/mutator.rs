@@ -554,6 +554,7 @@ impl DocumentMutator<'_> {
         // interaction state referencing removed nodes can retarget to the
         // nearest surviving ancestor.
         self.process_removed_subtree(node_id);
+        self.doc.detach_from_paint_tree(node_id);
 
         let node = &mut self.doc.nodes[node_id];
 
@@ -582,6 +583,7 @@ impl DocumentMutator<'_> {
     ) -> Option<Node> {
         let node_is_in_document = self.doc.nodes[node_id].flags.is_in_document();
         self.process_removed_subtree(node_id);
+        self.doc.detach_from_paint_tree(node_id);
 
         let node = self.doc.drop_node_ignoring_parent_with(node_id, on_drop);
         self.mutations_occurred |= node_is_in_document;
@@ -631,6 +633,7 @@ impl DocumentMutator<'_> {
         self.mutations_occurred |= parent_is_in_doc && !children.is_empty();
         for child_id in children {
             self.process_removed_subtree(child_id);
+            self.doc.detach_from_paint_tree(child_id);
             let _ = self.doc.drop_node_ignoring_parent(child_id);
         }
         self.maybe_record_node(node_id);
@@ -687,6 +690,9 @@ impl DocumentMutator<'_> {
         // parent's child list, and anchor indices would be computed against a
         // child list that still contains the moved nodes.
         for child_id in child_ids.iter().copied() {
+            if self.doc.nodes[child_id].parent.is_some() {
+                self.doc.detach_from_paint_tree(child_id);
+            }
             let child = &mut self.doc.nodes[child_id];
             let child_was_in_doc = child.flags.is_in_document();
             self.mutations_occurred |= child_was_in_doc;

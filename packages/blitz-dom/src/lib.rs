@@ -46,6 +46,8 @@ mod debug;
 mod events;
 mod font_metrics;
 mod form;
+#[cfg(test)]
+mod hit_after_removal_tests;
 mod hit_geometry;
 mod html;
 /// Loading of `<iframe>` elements into sub-documents.

@@ -213,6 +213,17 @@ impl StackingContext {
         self.negative_z_count = self.children.iter().take_while(|c| c.z_index < 0).count() as u32;
     }
 
+    /// Keep the entries `keep` accepts, in their sorted order.
+    fn retain(&mut self, keep: impl Fn(&HoistedPaintChild) -> bool) {
+        let len = self.children.len();
+        self.children.retain(|c| keep(c));
+        if self.children.len() != len {
+            self.negative_z_count =
+                self.children.iter().take_while(|c| c.z_index < 0).count() as u32;
+            self.hoisted_content_bbox.set((0, Rect::ZERO));
+        }
+    }
+
     pub fn neg_z_range(&self) -> Range<usize> {
         0..(self.negative_z_count as usize)
     }
@@ -247,6 +258,68 @@ impl BaseDocument {
     /// enclosing stacking context are replayed from `Node::sc_contribution_cache`.
     pub(crate) fn build_paint_tree(&mut self, root_id: NodeId) {
         self.build_paint_tree_impl(root_id, None);
+    }
+
+    /// Remove the boxes of `node_id`'s subtree (its DOM descendants,
+    /// pseudo-elements and anonymous blocks) from the paint lists of the boxes
+    /// around it: `paint_children`, stacking contexts and contribution caches.
+    /// The mutator calls this while the subtree is still attached, before it
+    /// is detached from its parent or dropped.
+    ///
+    /// The next resolve rebuilds these lists, but until then hit testing
+    /// walks them: the event driver runs default actions, which hit-test the
+    /// pointer again, after handlers that may have mutated the DOM, with no
+    /// resolve in between. A removed box would still be hit there, and a
+    /// dropped one dereferenced. Chromium updates layout before every hit
+    /// test, so a removed box is never hit; boxes outside the subtree keep
+    /// their last layout until the next resolve.
+    pub(crate) fn detach_from_paint_tree(&mut self, node_id: NodeId) {
+        let mut removed = std::collections::HashSet::new();
+        let mut stack = vec![node_id];
+        while let Some(id) = stack.pop() {
+            let Some(node) = self.nodes.get(id) else {
+                continue;
+            };
+            if !removed.insert(id) {
+                continue;
+            }
+            stack.extend(node.children.iter().copied());
+            stack.extend(node.anonymous_blocks.iter().copied());
+            stack.extend(node.before());
+            stack.extend(node.after());
+            if let Some(children) = node.layout_children.borrow().as_ref() {
+                stack.extend(children.iter().copied());
+            }
+        }
+
+        // Entries for the subtree's boxes are held by its ancestors: its
+        // layout parents (anonymous blocks included), containing blocks of
+        // its out-of-flow boxes and enclosing stacking-context roots.
+        let parents = |node: &Node| [node.layout_parent.get(), node.parent];
+        let mut ancestors: Vec<NodeId> = self
+            .nodes
+            .get(node_id)
+            .map(|node| parents(node).into_iter().flatten().collect())
+            .unwrap_or_default();
+        let mut visited = std::collections::HashSet::new();
+        while let Some(id) = ancestors.pop() {
+            if removed.contains(&id) || !visited.insert(id) {
+                continue;
+            }
+            let Some(node) = self.nodes.get_mut(id) else {
+                continue;
+            };
+            if let Some(paint_children) = node.paint_children.get_mut() {
+                paint_children.retain(|child| !removed.contains(child));
+            }
+            node.sc_contribution_cache
+                .get_mut()
+                .retain(|child| !removed.contains(&child.node_id));
+            if let Some(stacking_context) = node.stacking_context.as_mut() {
+                stacking_context.retain(|child| !removed.contains(&child.node_id));
+            }
+            ancestors.extend(parents(node).into_iter().flatten());
+        }
     }
 
     /// `stacking_context` is the entry list of the nearest ancestor stacking
