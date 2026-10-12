@@ -750,7 +750,27 @@ impl BaseDocument {
 
         #[cfg(not(feature = "floats"))]
         {
-            inline_layout.layout.break_all_lines(Some(width));
+            use parley::BalanceOptions;
+            use style::computed_values::text_wrap_style::T as TextWrapStyle;
+            use style::values::specified::TextAlignKeyword;
+
+            // `text-wrap-style: balance` applies to the block container's lines (Blink reads it
+            // from the inline formatting context root). Parley balances them as Blink does, in
+            // device pixels, so the effective zoom includes the scale.
+            let balance = self.nodes[node_id].primary_styles().and_then(|s| {
+                (s.clone_text_wrap_style() == TextWrapStyle::Balance).then(|| BalanceOptions {
+                    zoom: s.effective_zoom.value() * scale,
+                    justify: s.clone_text_align() == TextAlignKeyword::Justify,
+                })
+            });
+            match balance {
+                Some(options) => {
+                    inline_layout
+                        .layout
+                        .break_all_lines_balanced(Some(width), options);
+                }
+                None => inline_layout.layout.break_all_lines(Some(width)),
+            }
         }
 
         // Out-of-flow candidates bubbled up from this container and its in-flow subtree.
@@ -1221,4 +1241,163 @@ fn f32_max(a: f32, b: f32) -> f32 {
 fn round_up_width(width: f32, scale: f32, whole_pixels: bool) -> f32 {
     let unit = if whole_pixels { 1.0 } else { 64.0 };
     (width / scale * unit).ceil() / unit * scale
+}
+
+#[cfg(test)]
+mod text_wrap_balance_tests {
+    //! Lines as Chromium 153 breaks them in DejaVu Sans at 16px, with
+    //! `text-wrap: wrap` and `text-wrap: balance` on the paragraph.
+
+    use blitz_traits::shell::{ColorScheme, Viewport};
+
+    use crate::{Attribute, BaseDocument, DocumentConfig, NodeId, qual_name};
+
+    const HEADING: &str = "Balanced headings avoid a lonely last word at the end";
+    const HEADING_GREEDY: [&str; 2] = ["Balanced headings avoid a lonely", "last word at the end"];
+    const HEADING_BALANCED: [&str; 2] =
+        ["Balanced headings avoid a", "lonely last word at the end"];
+
+    fn attr(value: &str) -> Attribute {
+        Attribute {
+            name: qual_name!("style"),
+            value: value.into(),
+        }
+    }
+
+    /// Resolve `<p style="{p_style}">{text}</p>` (the text inside
+    /// `<span style="{span_style}">` if given) at `scale`; the paragraph's id.
+    fn resolve(
+        p_style: &str,
+        span_style: Option<&str>,
+        text: &str,
+        scale: f32,
+    ) -> (BaseDocument, NodeId) {
+        let font_ctx = crate::build_single_font_ctx(include_bytes!(
+            "../../../../examples/wasm_hello/assets/DejaVuSans.woff2"
+        ));
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(
+                (800.0 * scale) as u32,
+                (600.0 * scale) as u32,
+                scale,
+                ColorScheme::Light,
+            )),
+            font_ctx: Some(font_ctx),
+            ..Default::default()
+        });
+        let root = doc.root_node().id;
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![attr("display:block")]);
+        let body = mutator.create_element(qual_name!("body"), vec![attr("display:block;margin:0")]);
+        let p = mutator.create_element(
+            qual_name!("p"),
+            vec![attr(&format!(
+                "display:block;margin:0;font:16px sans-serif;{p_style}"
+            ))],
+        );
+        let text = mutator.create_text_node(text);
+        match span_style {
+            Some(style) => {
+                let span = mutator.create_element(qual_name!("span"), vec![attr(style)]);
+                mutator.append_children(span, &[text]);
+                mutator.append_children(p, &[span]);
+            }
+            None => mutator.append_children(p, &[text]),
+        }
+        mutator.append_children(body, &[p]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+        (doc, p)
+    }
+
+    /// The paragraph's lines, trimmed.
+    fn lines(p_style: &str, span_style: Option<&str>, text: &str, scale: f32) -> Vec<String> {
+        let (doc, p) = resolve(p_style, span_style, text, scale);
+        let data = doc.get_node(p).unwrap().element_data().unwrap();
+        let inline = data.inline_layout_data.as_ref().unwrap();
+        inline
+            .layout
+            .lines()
+            .map(|line| inline.text[line.text_range()].trim().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn balance_breaks_lines_as_chromium() {
+        assert_eq!(lines("width:300px", None, HEADING, 1.0), HEADING_GREEDY);
+        assert_eq!(
+            lines("width:300px;text-wrap:balance", None, HEADING, 1.0),
+            HEADING_BALANCED
+        );
+        assert_eq!(
+            lines(
+                "width:250px;text-wrap:balance",
+                None,
+                "The quick brown fox jumps over the lazy dog and keeps running far away",
+                1.0
+            ),
+            [
+                "The quick brown fox jumps",
+                "over the lazy dog and",
+                "keeps running far away"
+            ]
+        );
+    }
+
+    /// Breaking in device pixels at a device pixel ratio of 2 balances the same lines.
+    #[test]
+    fn balance_breaks_lines_as_chromium_at_dpr_2() {
+        assert_eq!(lines("width:300px", None, HEADING, 2.0), HEADING_GREEDY);
+        assert_eq!(
+            lines("width:300px;text-wrap:balance", None, HEADING, 2.0),
+            HEADING_BALANCED
+        );
+    }
+
+    /// With two break opportunities Chromium bisects the available width.
+    #[test]
+    fn balance_bisects_as_chromium() {
+        let text = "Internationalization standardization procedures";
+        assert_eq!(
+            lines("width:360px", None, text, 1.0),
+            ["Internationalization standardization", "procedures"]
+        );
+        assert_eq!(
+            lines("width:360px;text-wrap-style:balance", None, text, 1.0),
+            ["Internationalization", "standardization procedures"]
+        );
+    }
+
+    /// The paragraph's text-wrap-style applies, not an inline's.
+    #[test]
+    fn balance_follows_the_block_container() {
+        assert_eq!(
+            lines("width:300px", Some("text-wrap-style:balance"), HEADING, 1.0),
+            HEADING_GREEDY
+        );
+        assert_eq!(
+            lines(
+                "width:300px;text-wrap:balance",
+                Some("text-wrap-style:auto"),
+                HEADING,
+                1.0
+            ),
+            HEADING_BALANCED
+        );
+    }
+
+    /// `pretty` is not parsed (the compiler reports it), and `stable` breaks
+    /// greedily.
+    #[test]
+    fn other_wrap_styles_stay_greedy() {
+        for style in ["text-wrap:pretty", "text-wrap-style:stable"] {
+            assert_eq!(
+                lines(&format!("width:300px;{style}"), None, HEADING, 1.0),
+                HEADING_GREEDY,
+                "{style}"
+            );
+        }
+    }
 }
