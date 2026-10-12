@@ -886,6 +886,16 @@ mod tests {
             capitalized(vec![Text("ab"), El("wbr", "", vec![]), Text("cd")]),
             "Abcd"
         );
+        // Buttons do not inherit the transform; their last text precedes.
+        let (doc, ids) = resolve(p(vec![
+            Text("ab"),
+            El("button", "", vec![Text("x")]),
+            Text("cd"),
+        ]));
+        assert_eq!(laid_out(&doc, ids[0]).text, "Abcd");
+        let button = &doc.nodes[ids[1]];
+        let inner = button.layout_children.borrow().as_ref().unwrap()[0];
+        assert_eq!(laid_out(&doc, inner).text, "x");
     }
 
     #[test]

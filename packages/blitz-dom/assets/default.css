@@ -62,6 +62,8 @@ select,
 button,
 textarea {
     appearance: auto;
+    /* Form controls do not inherit a case transform (Chromium's html.css). */
+    text-transform: none;
 }
 
 /* https://html.spec.whatwg.org/#hidden-elements */
