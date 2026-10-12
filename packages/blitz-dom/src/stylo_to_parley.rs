@@ -425,13 +425,33 @@ pub(crate) fn inline_span_box_shaping_boundaries(style: &stylo::ComputedValues) 
 /// edge-less shaping and layout). The caller gates this to standards mode.
 pub(crate) fn inline_span_used_shaping_boundaries(style: &stylo::ComputedValues) -> (bool, bool) {
     match inline_span_edges(style, 1.0).1 {
-        Some(INLINE_EDGE_PERCENTAGE | INLINE_EDGE_NEGATIVE)
-            if !inline_span_needs_shaping_boundaries(style) =>
-        {
-            (false, false)
+        Some(INLINE_EDGE_PERCENTAGE | INLINE_EDGE_NEGATIVE) => {
+            inline_span_edge_less_shaping_boundaries(style)
         }
         _ => inline_span_shaping_boundaries(style),
     }
+}
+
+/// The shaping boundaries of an ordinary inline box that keeps its edge-less layout: alignment
+/// boundaries only. The caller gates this to standards mode.
+pub(crate) fn inline_span_edge_less_shaping_boundaries(
+    style: &stylo::ComputedValues,
+) -> (bool, bool) {
+    if inline_span_needs_shaping_boundaries(style) {
+        inline_span_shaping_boundaries(style)
+    } else {
+        (false, false)
+    }
+}
+
+/// Whether an ordinary inline box's edges are laid out as zero because an out-of-flow box was
+/// pushed at pending whitespace at a side (logical start, end) with a nonzero edge (see
+/// [`parley::Layout::inline_edge_sides_with_pending_out_of_flow_box`]).
+pub(crate) fn inline_span_edges_at_pending_out_of_flow_box(
+    edges: &parley::InlineEdges,
+    sides: (bool, bool),
+) -> bool {
+    (sides.0 && edges.start() != 0.0) || (sides.1 && edges.end() != 0.0)
 }
 
 /// Unsupported inputs of [`inline_span_edges`].
@@ -443,6 +463,7 @@ pub(crate) const INLINE_EDGE_VERTICAL: &str =
 pub(crate) const INLINE_EDGE_RTL: &str = "inline-axis margin, border or padding on an ordinary inline box in right-to-left or bidirectional text";
 pub(crate) const INLINE_EDGE_QUIRKS: &str = "horizontal margin, border or padding on an ordinary inline box in quirks mode (laid out as zero)";
 pub(crate) const INLINE_EDGE_BORDER_PAINT: &str = "a non-solid or rounded border on an ordinary inline box with horizontal edges (painted solid and square)";
+pub(crate) const INLINE_EDGE_PENDING_OUT_OF_FLOW: &str = "horizontal margin, border or padding on an ordinary inline box at a side where an out-of-flow box follows collapsible whitespace (laid out as zero)";
 pub(crate) const INLINE_EDGE_UNPLACED: &str = "horizontal margin, border or padding on an ordinary inline box with no adjacent text (an inline formatting context without text, or between atomic inline boxes; laid out as zero)";
 
 /// The used inline-axis margin, border and padding of an ordinary inline box, in layout units

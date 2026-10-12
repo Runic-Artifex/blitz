@@ -4145,6 +4145,16 @@ mod inline_edge_tests {
 
     /// `<div>a<span id=owner>b</span><span id=tail>c</span></div>`.
     fn document(owner_style: &str, quirks: bool) -> (BaseDocument, NodeId, NodeId) {
+        document_with(owner_style, quirks, "\u{2022}", false)
+    }
+
+    /// `<div>{lead}<span id=owner>[<i absolutely positioned>]b</span><span id=tail>c</span></div>`.
+    fn document_with(
+        owner_style: &str,
+        quirks: bool,
+        lead: &str,
+        out_of_flow: bool,
+    ) -> (BaseDocument, NodeId, NodeId) {
         let mut doc = BaseDocument::new(DocumentConfig {
             viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
             ..Default::default()
@@ -4177,8 +4187,15 @@ mod inline_edge_tests {
                 "display:block;font-family:EdgeTest;font-size:20px;line-height:30px",
             )],
         );
-        let lead = mutator.create_text_node("\u{2022}");
+        let lead = mutator.create_text_node(lead);
         let owner = mutator.create_element(qual_name!("span"), vec![attr(owner_style)]);
+        if out_of_flow {
+            let oof = mutator.create_element(
+                qual_name!("i"),
+                vec![attr("position:absolute;width:9px;height:12px")],
+            );
+            mutator.append_children(owner, &[oof]);
+        }
         let owner_text = mutator.create_text_node("\u{2022}");
         let tail = mutator.create_element(qual_name!("span"), vec![]);
         let tail_text = mutator.create_text_node("\u{2022}");
@@ -4258,6 +4275,44 @@ mod inline_edge_tests {
             doc.take_unsupported_layout_reports(),
             vec![crate::stylo_to_parley::INLINE_EDGE_NEGATIVE]
         );
+    }
+
+    #[test]
+    fn edges_at_an_out_of_flow_box_after_pending_whitespace_are_reported_and_zero() {
+        use crate::stylo_to_parley::INLINE_EDGE_PENDING_OUT_OF_FLOW;
+        let lead = "\u{2022} ";
+        let (plain_doc, owner, tail) = document_with("", false, lead, true);
+        let (plain, plain_tail) = (rect(&plain_doc, owner), rect(&plain_doc, tail));
+        // A margin-only change refreshes the built layout; a border is applied when it is built
+        // (with box-side shaping intent, which this box does not use either).
+        for style in [
+            "margin:0 7px 0 3px",
+            "margin:0 7px 0 3px;border-left:2px solid red",
+        ] {
+            let (mut doc, owner, tail) = document_with(style, false, lead, true);
+            assert_eq!(rect(&doc, owner), plain);
+            assert_eq!(rect(&doc, tail), plain_tail);
+            assert_eq!(
+                doc.take_unsupported_layout_reports(),
+                vec![INLINE_EDGE_PENDING_OUT_OF_FLOW]
+            );
+            let (mut doc, owner, tail) = document_with("", false, lead, true);
+            doc.mutate()
+                .set_attribute(owner, qual_name!("style"), style);
+            doc.resolve(0.0);
+            assert_eq!(rect(&doc, owner), plain);
+            assert_eq!(rect(&doc, tail), plain_tail);
+            assert_eq!(
+                doc.take_unsupported_layout_reports(),
+                vec![INLINE_EDGE_PENDING_OUT_OF_FLOW]
+            );
+        }
+        // Nothing is pending when the box is pushed: the edges apply.
+        let (plain_doc, owner, _) = document_with("", false, "\u{2022}", true);
+        let plain = rect(&plain_doc, owner);
+        let (mut doc, owner, _) = document_with("margin:0 7px 0 3px", false, "\u{2022}", true);
+        close(rect(&doc, owner).x, plain.x + 3.0);
+        assert!(doc.take_unsupported_layout_reports().is_empty());
     }
 
     #[test]

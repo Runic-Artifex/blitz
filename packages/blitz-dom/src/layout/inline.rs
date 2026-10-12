@@ -237,7 +237,8 @@ impl BaseDocument {
             .layout
             .styles()
             .iter()
-            .map(|style| {
+            .enumerate()
+            .map(|(style_index, style)| {
                 let owner_id = style.brush.id;
                 if owner_id == node_id {
                     return Some(parley::InlineEdges::ZERO);
@@ -257,6 +258,16 @@ impl BaseDocument {
                 }
                 if !standards {
                     edge_reports.push(stylo_to_parley::INLINE_EDGE_QUIRKS);
+                    return Some(parley::InlineEdges::ZERO);
+                }
+                // Parley places an out-of-flow box pushed at pending whitespace before that
+                // whitespace, inconsistently with an edge at the same position: the box keeps
+                // its edge-less layout (and construction its edge-less shaping).
+                let pending = inline_layout
+                    .layout
+                    .inline_edge_sides_with_pending_out_of_flow_box(style_index);
+                if stylo_to_parley::inline_span_edges_at_pending_out_of_flow_box(&edges, pending) {
+                    edge_reports.push(stylo_to_parley::INLINE_EDGE_PENDING_OUT_OF_FLOW);
                     return Some(parley::InlineEdges::ZERO);
                 }
                 if !computed.writing_mode.is_bidi_ltr() {

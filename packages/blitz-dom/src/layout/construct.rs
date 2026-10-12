@@ -1196,64 +1196,136 @@ pub(crate) fn build_inline_layout_into(
             ..Default::default()
         });
 
-    // Create a parley tree builder
-    let mut builder = layout_ctx.tree_builder(font_ctx, scale, true, &parley_style);
-    builder.set_quantization_mode(QuantizationMode::Logical);
-    builder.set_empty_span_participation(nodes.quirks_mode() == crate::QuirksMode::NoQuirks);
-    builder.set_style_span_tracking(nodes.quirks_mode() == crate::QuirksMode::NoQuirks);
-    // Line break opportunities as Chromium has them (no break inside "1/2",
-    // a break after the hyphen in "1999-12-31", ...).
-    builder.set_line_break_override(Some(parley::CHROMIUM_LINE_BREAK_OVERRIDE));
-    if let Some(style) = root_node_style.as_deref() {
-        builder.set_base_direction(stylo_to_parley::base_direction(
-            style.clone_direction(),
-            style.clone_unicode_bidi(),
-        ));
-    }
-
     let text_transform = root_node_style
         .as_ref()
         .map(|s| s.clone_text_transform() & TextTransform::CASE_TRANSFORMS)
         .unwrap_or(TextTransform::NONE);
 
-    // Render position-inside list items
-    if let Some(ListItemLayout {
-        marker,
-        position: ListItemLayoutPosition::Inside,
-    }) = root_node
-        .element_data()
-        .and_then(|el| el.list_item_data.as_deref())
-    {
-        match marker {
-            // Bullet glyphs live in the bundled bullet font. The position-outside
-            // path already asks for it; without the same span here a marker like
-            // disclosure-closed (U+25B8) falls back to the element's own font and
-            // renders as a missing glyph.
-            Marker::Char(char) => {
-                let mut marker_style = parley_style.clone();
-                marker_style.font_family = BULLET_FONT_FAMILY.into();
-                builder.push_style_span(marker_style);
-                builder.push_text(&format!("{char} "));
-                builder.pop_style_span();
-            }
-            Marker::String(str) => builder.push_text(str),
+    // Spans that keep their edge-less shaping, found from the built text (see
+    // `edge_less_spans`). Their boundaries do not affect it, so one rebuild suffices.
+    let mut edge_less: Vec<NodeId> = Vec::new();
+    loop {
+        // Create a parley tree builder
+        let mut builder = layout_ctx.tree_builder(font_ctx, scale, true, &parley_style);
+        builder.set_quantization_mode(QuantizationMode::Logical);
+        builder.set_empty_span_participation(nodes.quirks_mode() == crate::QuirksMode::NoQuirks);
+        builder.set_style_span_tracking(nodes.quirks_mode() == crate::QuirksMode::NoQuirks);
+        // Line break opportunities as Chromium has them (no break inside "1/2",
+        // a break after the hyphen in "1999-12-31", ...).
+        builder.set_line_break_override(Some(parley::CHROMIUM_LINE_BREAK_OVERRIDE));
+        if let Some(style) = root_node_style.as_deref() {
+            builder.set_base_direction(stylo_to_parley::base_direction(
+                style.clone_direction(),
+                style.clone_unicode_bidi(),
+            ));
         }
-    };
 
-    if let Some(before_id) = root_node.before() {
-        build_inline_layout_recursive(&mut builder, nodes, before_id, text_transform, scale);
-    }
-    for child_id in root_node.children.iter().copied() {
-        build_inline_layout_recursive(&mut builder, nodes, child_id, text_transform, scale);
-    }
-    if let Some(after_id) = root_node.after() {
-        build_inline_layout_recursive(&mut builder, nodes, after_id, text_transform, scale);
-    }
+        // Render position-inside list items
+        if let Some(ListItemLayout {
+            marker,
+            position: ListItemLayoutPosition::Inside,
+        }) = root_node
+            .element_data()
+            .and_then(|el| el.list_item_data.as_deref())
+        {
+            match marker {
+                // Bullet glyphs live in the bundled bullet font. The position-outside
+                // path already asks for it; without the same span here a marker like
+                // disclosure-closed (U+25B8) falls back to the element's own font and
+                // renders as a missing glyph.
+                Marker::Char(char) => {
+                    let mut marker_style = parley_style.clone();
+                    marker_style.font_family = BULLET_FONT_FAMILY.into();
+                    builder.push_style_span(marker_style);
+                    builder.push_text(&format!("{char} "));
+                    builder.pop_style_span();
+                }
+                Marker::String(str) => builder.push_text(str),
+            }
+        };
 
-    (text_layout.text, text_layout.sources) =
-        builder.build_into_with_sources(&mut text_layout.layout);
+        if let Some(before_id) = root_node.before() {
+            build_inline_layout_recursive(
+                &mut builder,
+                nodes,
+                before_id,
+                text_transform,
+                scale,
+                &edge_less,
+            );
+        }
+        for child_id in root_node.children.iter().copied() {
+            build_inline_layout_recursive(
+                &mut builder,
+                nodes,
+                child_id,
+                text_transform,
+                scale,
+                &edge_less,
+            );
+        }
+        if let Some(after_id) = root_node.after() {
+            build_inline_layout_recursive(
+                &mut builder,
+                nodes,
+                after_id,
+                text_transform,
+                scale,
+                &edge_less,
+            );
+        }
+
+        (text_layout.text, text_layout.sources) =
+            builder.build_into_with_sources(&mut text_layout.layout);
+        if !edge_less.is_empty() {
+            break;
+        }
+        edge_less = edge_less_spans(nodes, &text_layout.layout, inline_context_root_node_id);
+        if edge_less.is_empty() {
+            break;
+        }
+    }
     text_layout.content_widths = None;
     return;
+
+    /// Ordinary spans built with box-side shaping boundaries whose edges are nevertheless laid
+    /// out as zero because an out-of-flow box was pushed at pending whitespace at an edged side
+    /// (see `Layout::inline_edge_sides_with_pending_out_of_flow_box`).
+    fn edge_less_spans(
+        nodes: &crate::NodeTree,
+        layout: &parley::Layout<TextBrush>,
+        root_id: NodeId,
+    ) -> Vec<NodeId> {
+        let mut spans = Vec::new();
+        if nodes.quirks_mode() != crate::QuirksMode::NoQuirks {
+            return spans;
+        }
+        for (style_index, style) in layout.styles().iter().enumerate() {
+            let owner_id = style.brush.id;
+            if owner_id == root_id || spans.contains(&owner_id) {
+                continue;
+            }
+            let Some(computed) = nodes.get(owner_id).and_then(|owner| owner.primary_styles())
+            else {
+                continue;
+            };
+            let (edges, unsupported) = stylo_to_parley::inline_span_edges(&computed, 1.0);
+            if unsupported.is_some_and(|report| {
+                report == stylo_to_parley::INLINE_EDGE_PERCENTAGE
+                    || report == stylo_to_parley::INLINE_EDGE_NEGATIVE
+            }) {
+                continue;
+            }
+            let pending = layout.inline_edge_sides_with_pending_out_of_flow_box(style_index);
+            if stylo_to_parley::inline_span_edges_at_pending_out_of_flow_box(&edges, pending)
+                && stylo_to_parley::inline_span_used_shaping_boundaries(&computed)
+                    != stylo_to_parley::inline_span_edge_less_shaping_boundaries(&computed)
+            {
+                spans.push(owner_id);
+            }
+        }
+        spans
+    }
 
     fn build_inline_layout_recursive(
         builder: &mut TreeBuilder<TextBrush>,
@@ -1261,6 +1333,7 @@ pub(crate) fn build_inline_layout_into(
         node_id: NodeId,
         parent_text_transform: TextTransform,
         scale: f32,
+        edge_less: &[NodeId],
     ) {
         let node = &nodes[node_id];
 
@@ -1323,6 +1396,7 @@ pub(crate) fn build_inline_layout_into(
                                 child_id,
                                 text_transform,
                                 scale,
+                                edge_less,
                             );
                         }
                         builder.pop_style_span();
@@ -1365,14 +1439,19 @@ pub(crate) fn build_inline_layout_into(
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                             // Per-side shaping intent: alignment breaks shaping on both sides,
                             // nonzero inline box edges on their own side.
-                            let (boundary_before, boundary_after) =
-                                if nodes.quirks_mode() == crate::QuirksMode::NoQuirks {
-                                    style.map_or((false, false), |s| {
+                            let (boundary_before, boundary_after) = if nodes.quirks_mode()
+                                == crate::QuirksMode::NoQuirks
+                            {
+                                style.map_or((false, false), |s| {
+                                    if edge_less.contains(&node_id) {
+                                        stylo_to_parley::inline_span_edge_less_shaping_boundaries(s)
+                                    } else {
                                         stylo_to_parley::inline_span_used_shaping_boundaries(s)
-                                    })
-                                } else {
-                                    (false, false)
-                                };
+                                    }
+                                })
+                            } else {
+                                (false, false)
+                            };
                             let style = node
                                 .primary_styles()
                                 .map(|s| {
@@ -1400,6 +1479,7 @@ pub(crate) fn build_inline_layout_into(
                                     before_id,
                                     text_transform,
                                     scale,
+                                    edge_less,
                                 );
                             }
 
@@ -1410,6 +1490,7 @@ pub(crate) fn build_inline_layout_into(
                                     child_id,
                                     text_transform,
                                     scale,
+                                    edge_less,
                                 );
                             }
                             if let Some(after_id) = node.after() {
@@ -1419,6 +1500,7 @@ pub(crate) fn build_inline_layout_into(
                                     after_id,
                                     text_transform,
                                     scale,
+                                    edge_less,
                                 );
                             }
 
