@@ -38,6 +38,8 @@ mod field_sizing_tests;
 #[cfg(test)]
 mod sticky_tests;
 #[cfg(test)]
+mod text_clip_tests;
+#[cfg(test)]
 mod text_input_height_tests;
 
 use self::replaced::{
