@@ -278,10 +278,13 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         }
         let has_opacity = opacity < 1.0;
 
-        let is_text_input = node
+        // A single-line text input's text is clipped to its content box (its
+        // inner editor's box); a text area is a scroll container clipped at
+        // its padding box, as in Chromium.
+        let single_line_input = node
             .element_data()
             .and_then(|el| el.text_input_data())
-            .is_some();
+            .is_some_and(|input| !input.is_multiline);
         // Hit testing clips with the same predicate (`Node::clips_overflow`).
         let should_clip = node.clips_overflow();
 
@@ -383,7 +386,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // scrolled out of view is culled rather than drawn and clipped away. The box used
         // here matches the clip applied to the content below.
         let child_clip_rect = if should_clip {
-            let clip_box = if is_text_input {
+            let clip_box = if single_line_input {
                 cx.frame.content_box_path()
             } else {
                 cx.frame.padding_box_path()
@@ -597,7 +600,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                         cx.stroke_devtools(scene);
 
                         // TODO: allow layers with opacity to be unclipped (overflow: visible)
-                        let clip = if is_text_input {
+                        let clip = if single_line_input {
                             &cx.frame.content_box_path()
                         } else {
                             &cx.frame.padding_box_path()
