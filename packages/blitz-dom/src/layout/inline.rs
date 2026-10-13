@@ -251,6 +251,16 @@ impl BaseDocument {
                 {
                     return Some(parley::InlineEdges::ZERO);
                 }
+                // Blink offsets a sticky inline box by its lines' bounding box; Blitz
+                // paints and hit-tests its fragments where they flow.
+                let inset = stylo_taffy::convert::inset_rect(&computed);
+                if computed.get_box().position == style::computed_values::position::T::Sticky
+                    && [inset.left, inset.right, inset.top, inset.bottom]
+                        .iter()
+                        .any(|side| !side.is_auto())
+                {
+                    edge_reports.push(stylo_to_parley::INLINE_STICKY);
+                }
                 let (edges, unsupported) = stylo_to_parley::inline_span_edges(&computed, scale);
                 edge_reports.extend(unsupported);
                 if edges.is_zero() {

@@ -36,6 +36,8 @@ pub(crate) mod text_transform;
 #[cfg(test)]
 mod field_sizing_tests;
 #[cfg(test)]
+mod sticky_tests;
+#[cfg(test)]
 mod text_input_height_tests;
 
 use self::replaced::{

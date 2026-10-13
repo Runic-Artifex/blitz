@@ -464,6 +464,8 @@ pub(crate) const INLINE_EDGE_RTL: &str = "inline-axis margin, border or padding 
 pub(crate) const INLINE_EDGE_QUIRKS: &str = "horizontal margin, border or padding on an ordinary inline box in quirks mode (laid out as zero)";
 pub(crate) const INLINE_EDGE_BORDER_PAINT: &str = "a non-solid or rounded border on an ordinary inline box with horizontal edges (painted solid and square)";
 pub(crate) const INLINE_EDGE_PENDING_OUT_OF_FLOW: &str = "horizontal margin, border or padding on an ordinary inline box at a side where an out-of-flow box follows collapsible whitespace (laid out as zero)";
+pub(crate) const INLINE_STICKY: &str = "position: sticky with an inset on an ordinary (non-atomic) inline box, which Blitz lays out, paints and hit-tests where it flows";
+
 pub(crate) const INLINE_EDGE_UNPLACED: &str = "horizontal margin, border or padding on an ordinary inline box with no adjacent text (an inline formatting context without text, or between atomic inline boxes; laid out as zero)";
 
 /// The used inline-axis margin, border and padding of an ordinary inline box, in layout units

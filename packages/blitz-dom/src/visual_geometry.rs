@@ -220,17 +220,33 @@ impl Node {
             }
             ancestor = node.containing_block().map(|id| self.with(id));
         }
+        // The sticky view rectangle: the scrollport without the scroll
+        // container's padding, as Blink's `ComputeStickyConstrainingRect`
+        // (Chromium 153); percentage insets resolve against its size.
         let (port_x, port_y, width, height) = match scroller {
             Some(node) => {
                 let own_scroll = node.scroll_offset();
                 let origin =
                     node.unrounded_absolute_position(own_scroll.x as f32, own_scroll.y as f32);
-                let border = node.unrounded_layout().border;
+                let layout = node.unrounded_layout();
+                let (border, padding) = (layout.border, layout.padding);
                 (
-                    origin.x + border.left,
-                    origin.y + border.top,
-                    node.client_width(),
-                    node.client_height(),
+                    origin.x + border.left + padding.left,
+                    origin.y + border.top + padding.top,
+                    (layout.size.width
+                        - border.left
+                        - border.right
+                        - layout.scrollbar_size.width
+                        - padding.left
+                        - padding.right)
+                        .max(0.0),
+                    (layout.size.height
+                        - border.top
+                        - border.bottom
+                        - layout.scrollbar_size.height
+                        - padding.top
+                        - padding.bottom)
+                        .max(0.0),
                 )
             }
             None => {
@@ -245,7 +261,12 @@ impl Node {
         let right = inset.right.maybe_resolve(Some(width), resolve_calc_value);
         let top = inset.top.maybe_resolve(Some(height), resolve_calc_value);
         let bottom = inset.bottom.maybe_resolve(Some(height), resolve_calc_value);
-        let rtl = styles.clone_direction() == style::computed_values::direction::T::Rtl;
+        // Which inset gives way when both cannot hold follows the sticky
+        // container's direction (Blink: its writing direction's `IsFlippedX`).
+        let rtl = cb
+            .primary_styles()
+            .map_or(styles.clone_direction(), |s| s.clone_direction())
+            == style::computed_values::direction::T::Rtl;
         Point {
             x: sticky_axis(
                 normal.x,
