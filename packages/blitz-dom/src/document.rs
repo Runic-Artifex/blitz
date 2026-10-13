@@ -1850,6 +1850,38 @@ impl BaseDocument {
         }
     }
 
+    /// Lay out again the text controls sized by their content (`field-sizing:
+    /// content`) whose text changed since the last pass. Values change
+    /// through typing, IME, script and attributes, none of which restyles the
+    /// control, so this runs after each style pass.
+    pub(crate) fn sync_content_sized_text_controls(&mut self) {
+        use std::hash::{Hash, Hasher};
+        let mut changed = Vec::new();
+        for (id, node) in self.nodes.iter_mut() {
+            let content_sized = node.primary_styles().is_some_and(|style| {
+                style.clone_field_sizing() == style::computed_values::field_sizing::T::Content
+            });
+            let Some(input) = node
+                .element_data_mut()
+                .and_then(|element| element.text_input_data_mut())
+            else {
+                continue;
+            };
+            let text = content_sized.then(|| {
+                let mut hasher = std::hash::DefaultHasher::new();
+                input.editor.raw_text().hash(&mut hasher);
+                hasher.finish()
+            });
+            if input.content_sized_text != text {
+                input.content_sized_text = text;
+                changed.push(id);
+            }
+        }
+        for id in changed {
+            self.nodes[id].insert_damage(style::selector_parser::RestyleDamage::RELAYOUT);
+        }
+    }
+
     /// Set or clear `FOCUS_WITHIN` (`:focus-within`) on `node_id` and its
     /// ancestors.
     fn set_focus_within(&mut self, node_id: NodeId, on: bool) {

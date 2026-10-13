@@ -151,6 +151,10 @@ button {
 
 textarea {
     font-family: monospace;
+    /* Chromium's html.css: the text keeps its spaces and breaks words that
+     * do not fit (which `field-sizing: content` sizes the box by). */
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
 }
 
 /* Form controls do not inherit the line height: Chromium's UA font

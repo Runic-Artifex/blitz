@@ -32,6 +32,9 @@ pub(crate) mod replaced;
 pub(crate) mod table;
 pub(crate) mod text_transform;
 
+#[cfg(test)]
+mod field_sizing_tests;
+
 use self::replaced::{
     IntrinsicSizes, ReplacedContext, compute_replaced_layout, is_replaced_element,
 };
@@ -290,6 +293,7 @@ impl BaseDocument {
         });
         let font_size = font_styles.map(|s| s.0);
         let resolved_line_height = font_styles.map(|s| s.1);
+        let content_sized = node.primary_styles().is_some_and(|s| is_content_sized(&s));
 
         match &mut node.data {
             NodeData::Text(data) => {
@@ -337,17 +341,87 @@ impl BaseDocument {
                         .attr(local_name!("cols"))
                         .and_then(|val| val.parse::<f32>().ok());
 
-                    let mut output = compute_leaf_layout(
-                        inputs,
-                        &node.layout_style(),
-                        resolve_calc_value,
-                        |_known_size, _available_space| taffy::Size {
-                            width: cols
-                                .map(|cols| cols * font_size.unwrap_or(16.0) * 0.6)
-                                .unwrap_or(300.0),
-                            height: resolved_line_height.unwrap_or(16.0) * rows,
-                        },
-                    );
+                    let mut output = if content_sized {
+                        // `field-sizing: content`: `rows` and `cols` are
+                        // ignored and the box is sized by its text (or, while
+                        // that is empty, its placeholder), wrapped at the
+                        // width the box gets (Blink's
+                        // `DefaultIntrinsicContentInlineSize` and
+                        // `...BlockSize` are indefinite, so the inner editor
+                        // and placeholder size it).
+                        let scale = self.viewport.scale();
+                        let mut special = std::mem::take(&mut element_data.special_data);
+                        let definite_width = node
+                            .layout_style()
+                            .size()
+                            .width
+                            .maybe_resolve(inputs.parent_size.width, resolve_calc_value)
+                            .is_some();
+                        let mut font_ctx = self.font_ctx.lock().unwrap();
+                        let layout_ctx = &mut self.layout_ctx;
+                        let output = compute_leaf_layout(
+                            inputs,
+                            &node.layout_style(),
+                            resolve_calc_value,
+                            |known_size, available_space| {
+                                let SpecialElementData::TextInput(input) = &mut special else {
+                                    return taffy::Size::ZERO;
+                                };
+                                let widths = text_control_content_widths(
+                                    input,
+                                    &mut font_ctx,
+                                    layout_ctx,
+                                    scale,
+                                );
+                                // The width the text wraps at: the box's
+                                // when it is known (Taffy then makes it the
+                                // available width), else the fit-content
+                                // width (Blink's text controls fit their
+                                // content, `AutoWidthShouldFitContent`).
+                                let width =
+                                    known_size.width.unwrap_or(match available_space.width {
+                                        AvailableSpace::Definite(limit)
+                                            if definite_width
+                                                || inputs.known_dimensions.width.is_some() =>
+                                        {
+                                            limit
+                                        }
+                                        AvailableSpace::Definite(limit) => {
+                                            limit.min(widths.max).max(widths.min)
+                                        }
+                                        AvailableSpace::MinContent => widths.min,
+                                        AvailableSpace::MaxContent => widths.max,
+                                    });
+                                taffy::Size {
+                                    width,
+                                    height: textarea_content_height(
+                                        input,
+                                        width,
+                                        &mut font_ctx,
+                                        layout_ctx,
+                                        scale,
+                                    ),
+                                }
+                            },
+                        );
+                        drop(font_ctx);
+                        if let Some(element) = node.data.downcast_element_mut() {
+                            element.special_data = special;
+                        }
+                        output
+                    } else {
+                        compute_leaf_layout(
+                            inputs,
+                            &node.layout_style(),
+                            resolve_calc_value,
+                            |_known_size, _available_space| taffy::Size {
+                                width: cols
+                                    .map(|cols| cols * font_size.unwrap_or(16.0) * 0.6)
+                                    .unwrap_or(300.0),
+                                height: resolved_line_height.unwrap_or(16.0) * rows,
+                            },
+                        )
+                    };
                     if inputs.run_mode == RunMode::PerformLayout {
                         let pb = {
                             let style = node.layout_style();
@@ -370,6 +444,14 @@ impl BaseDocument {
                                 &mut self.font_ctx.lock().unwrap(),
                                 &mut self.layout_ctx,
                             );
+                            // A text area's placeholder wraps at its content
+                            // width, as Blink lays it out in the content box
+                            // (`HandleTextControlPlaceholder`).
+                            if let Some(placeholder) = input.placeholder.as_mut() {
+                                placeholder
+                                    .layout
+                                    .break_all_lines(Some(content_width * scale));
+                            }
                         }
                     }
                     // Flex/grid baseline alignment uses the editor's first
@@ -438,22 +520,42 @@ impl BaseDocument {
                                 .and_then(|value| value.parse::<u32>().ok())
                                 .filter(|size| *size > 0)
                                 .unwrap_or(20) as f32;
-                            let intrinsic_width = node
-                                .primary_styles()
-                                .and_then(|style| {
-                                    let font_size = style.clone_font_size().used_size().px();
-                                    text_control_font_metrics(
+                            // `field-sizing: content`: `size` is ignored and
+                            // the width is the text's (or, while that is
+                            // empty, the placeholder's); the inner editor
+                            // does not wrap, so its min- and max-content
+                            // widths are the same.
+                            let content_width = match &mut element_data.special_data {
+                                SpecialElementData::TextInput(input) if content_sized => Some(
+                                    text_control_content_widths(
+                                        input,
                                         &mut self.font_ctx.lock().unwrap(),
-                                        style.get_font(),
-                                        font_size,
+                                        &mut self.layout_ctx,
+                                        self.viewport.scale(),
                                     )
-                                    .map(|metrics| {
-                                        (metrics.average_width * factor
-                                            + metrics
-                                                .max_width
-                                                .map(|max_width| max_width - metrics.average_width)
-                                                .unwrap_or(0.0))
-                                        .ceil()
+                                    .max,
+                                ),
+                                _ => None,
+                            };
+                            let intrinsic_width = content_width
+                                .or_else(|| {
+                                    node.primary_styles().and_then(|style| {
+                                        let font_size = style.clone_font_size().used_size().px();
+                                        text_control_font_metrics(
+                                            &mut self.font_ctx.lock().unwrap(),
+                                            style.get_font(),
+                                            font_size,
+                                        )
+                                        .map(|metrics| {
+                                            (metrics.average_width * factor
+                                                + metrics
+                                                    .max_width
+                                                    .map(|max_width| {
+                                                        max_width - metrics.average_width
+                                                    })
+                                                    .unwrap_or(0.0))
+                                            .ceil()
+                                        })
                                     })
                                 })
                                 // Match HTML's font-independent character-width
@@ -471,14 +573,20 @@ impl BaseDocument {
                                         AvailableSpace::Definite(limit) => {
                                             limit.min(intrinsic_width)
                                         }
+                                        // A percentage width contributes no
+                                        // min-content width to fixed-size
+                                        // controls only (Blink's
+                                        // `ContentMinimumInlineSize`
+                                        // applies `ApplyControlFixedSize`).
                                         AvailableSpace::MinContent
-                                            if node
-                                                .layout_style()
-                                                .size()
-                                                .width
-                                                .into_raw()
-                                                .tag()
-                                                == taffy::CompactLength::PERCENT_TAG =>
+                                            if !content_sized
+                                                && node
+                                                    .layout_style()
+                                                    .size()
+                                                    .width
+                                                    .into_raw()
+                                                    .tag()
+                                                    == taffy::CompactLength::PERCENT_TAG =>
                                         {
                                             0.0
                                         }
@@ -1075,6 +1183,71 @@ fn text_input_baseline(
     let content_height = size.height - pb.vertical_axis_sum();
     let offset = input.vertical_centering_offset(content_height, scale);
     Some(pb.top + offset + line.metrics().baseline / scale)
+}
+
+/// Whether a text control is sized by its content (`field-sizing: content`).
+/// Blink's `ComputedStyle::ApplyControlFixedSize` also keeps an autofilled
+/// control's fixed size; Blitz does not autofill.
+fn is_content_sized(style: &style::properties::ComputedValues) -> bool {
+    style.clone_field_sizing() == style::computed_values::field_sizing::T::Content
+}
+
+/// The min- and max-content widths, in CSS pixels, of a text control sized by
+/// its content: its text's or, while that is empty, its placeholder's (Blink
+/// lays out the placeholder only while it is shown), each rounded up to a
+/// layout unit (1/64 px, Blink's `LayoutUnit::FromFloatCeil`) and at least
+/// the caret's width (Blink gives the inner editor `min-width:
+/// BarCaretWidth()`, one CSS pixel; `caret-shape` is not supported).
+fn text_control_content_widths(
+    input: &mut crate::node::TextInputData,
+    font_ctx: &mut parley::FontContext,
+    layout_ctx: &mut parley::LayoutContext<crate::node::TextBrush>,
+    scale: f32,
+) -> parley::ContentWidths {
+    let widths = match input.placeholder.as_ref() {
+        Some(placeholder) if input.editor.raw_text().is_empty() => {
+            placeholder.layout.calculate_content_widths()
+        }
+        // Parley shapes empty text as a space, which preserved white space
+        // would count; an empty control has no content.
+        _ if input.editor.raw_text().is_empty() => parley::ContentWidths { min: 0.0, max: 0.0 },
+        _ => {
+            input.editor.refresh_layout(font_ctx, layout_ctx);
+            input
+                .editor
+                .try_layout()
+                .map(|layout| layout.calculate_content_widths())
+                .unwrap_or(parley::ContentWidths { min: 0.0, max: 0.0 })
+        }
+    };
+    let css = |width: f32| ((width / scale * 64.0).ceil() / 64.0).max(1.0);
+    parley::ContentWidths {
+        min: css(widths.min),
+        max: css(widths.max),
+    }
+}
+
+/// The content height, in CSS pixels, of a text area sized by its content
+/// whose text wraps at `width`: its editor's lines (one when empty), or its
+/// placeholder's while shown if they are taller.
+fn textarea_content_height(
+    input: &mut crate::node::TextInputData,
+    width: f32,
+    font_ctx: &mut parley::FontContext,
+    layout_ctx: &mut parley::LayoutContext<crate::node::TextBrush>,
+    scale: f32,
+) -> f32 {
+    input.editor.set_width(Some(width * scale));
+    input.editor.refresh_layout(font_ctx, layout_ctx);
+    let editor = input.editor.try_layout().map_or(0.0, |l| l.height());
+    let placeholder = match input.placeholder.as_mut() {
+        Some(placeholder) if input.editor.raw_text().is_empty() => {
+            placeholder.layout.break_all_lines(Some(width * scale));
+            placeholder.layout.height()
+        }
+        _ => 0.0,
+    };
+    editor.max(placeholder) / scale
 }
 
 /// Textarea editor baselines at the start padding edge. Flex/grid use the

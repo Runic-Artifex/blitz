@@ -117,6 +117,7 @@ impl BaseDocument {
 
         // we need to resolve stylist first since it will need to drive our layout bits
         self.resolve_stylist(current_time_for_animations);
+        self.sync_content_sized_text_controls();
         timer.record_time("style");
 
         // Non-incremental mode is "every node is damaged every frame": mark the

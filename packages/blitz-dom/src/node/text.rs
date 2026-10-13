@@ -169,6 +169,10 @@ pub struct TextInputData {
     /// vertical offset. It is kept up to date so that the caret remains visible within the
     /// input's content box.
     pub scroll_offset: f32,
+    /// A hash of the text (preedit included) the control was last laid out
+    /// for, kept while it is sized by its content (`field-sizing: content`),
+    /// whose box changes with its text.
+    pub(crate) content_sized_text: Option<u64>,
 }
 
 // FIXME: Implement Clone for PlainEditor
@@ -186,6 +190,7 @@ impl TextInputData {
             placeholder: None,
             is_multiline,
             scroll_offset: 0.0,
+            content_sized_text: None,
         }
     }
 

@@ -1075,6 +1075,16 @@ fn create_text_editor(doc: &mut BaseDocument, input_element_id: NodeId, is_multi
 
     text_input_data.placeholder = placeholder;
 
+    // A single-line inner editor is `white-space: pre` with `overflow-wrap:
+    // normal` whatever its input's style (Blink's
+    // `TextControlInnerEditorElement::CustomStyleForLayoutObject`), so its
+    // trailing spaces count towards its width.
+    if !is_multiline {
+        parley_style.white_space_collapse = WhiteSpaceCollapse::Preserve;
+        parley_style.text_wrap_mode = parley::TextWrapMode::NoWrap;
+        parley_style.overflow_wrap = parley::OverflowWrap::Normal;
+    }
+
     let editor = &mut text_input_data.editor;
     editor.set_scale(doc.viewport.scale_f64() as f32);
     editor.set_quantization_mode(QuantizationMode::Logical);
