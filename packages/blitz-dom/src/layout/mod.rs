@@ -35,6 +35,8 @@ pub(crate) mod text_transform;
 
 #[cfg(test)]
 mod field_sizing_tests;
+#[cfg(test)]
+mod text_input_height_tests;
 
 use self::replaced::{
     IntrinsicSizes, ReplacedContext, compute_replaced_layout, is_replaced_element,
@@ -521,6 +523,31 @@ impl BaseDocument {
                                 .and_then(|value| value.parse::<u32>().ok())
                                 .filter(|size| *size > 0)
                                 .unwrap_or(20) as f32;
+                            // The content height is the inner editor's line
+                            // (Blink's text field has no intrinsic block size
+                            // of its own: its inner editor, a block with a
+                            // line even when empty, sizes it). The editor's
+                            // line height is `normal` when the input's is at
+                            // most its font size or its `height` is a
+                            // percentage or a length above its line height
+                            // (`single_line_editor_line_height`), so an input
+                            // sized by its content (an automatic `height`, a
+                            // content flex basis, its automatic minimum size)
+                            // is then as tall as the font's line, not as its
+                            // `line-height`.
+                            let editor_height = match &mut element_data.special_data {
+                                SpecialElementData::TextInput(input) => {
+                                    input.editor.refresh_layout(
+                                        &mut self.font_ctx.lock().unwrap(),
+                                        &mut self.layout_ctx,
+                                    );
+                                    input
+                                        .editor
+                                        .try_layout()
+                                        .map(|layout| layout.height() / self.viewport.scale())
+                                }
+                                _ => None,
+                            };
                             // `field-sizing: content`: `size` is ignored and
                             // the width is the text's (or, while that is
                             // empty, the placeholder's); the inner editor
@@ -595,7 +622,7 @@ impl BaseDocument {
                                             intrinsic_width
                                         }
                                     },
-                                    height: resolved_line_height.unwrap_or(16.0),
+                                    height: editor_height.or(resolved_line_height).unwrap_or(16.0),
                                 },
                             );
                             output.baselines.first = text_input_baseline(
