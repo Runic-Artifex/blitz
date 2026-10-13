@@ -790,7 +790,8 @@ fn collect_table_cells(
         DisplayInside::Flow
         | DisplayInside::FlowRoot
         | DisplayInside::Flex
-        | DisplayInside::Grid => {
+        | DisplayInside::Grid
+        | DisplayInside::WebkitBox => {
             node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
             if display.outside() == DisplayOutside::TableCaption {
                 node.insert_damage(CONSTRUCT_FC | CONSTRUCT_BOX);

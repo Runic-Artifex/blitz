@@ -705,13 +705,15 @@ fn flush_line_decorations(
     }
 }
 
-/// Truncation of one line for `text-overflow: ellipsis`.
+/// Truncation of one line for `text-overflow: ellipsis` or
+/// `-webkit-line-clamp`.
 struct Ellipsis {
     font: parley::FontData,
     font_size: f32,
     coords: Vec<i16>,
     baseline: f32,
-    glyph: u32,
+    /// The ellipsis glyphs and their offsets from `visible_end`.
+    glyphs: Vec<(u32, f32)>,
     advance: f32,
     /// Glyphs ending after this x are not drawn.
     cutoff: f32,
@@ -745,6 +747,10 @@ fn ellipsis_glyph(font: &parley::FontData, font_size: f32, coords: &[i16]) -> Op
 /// overflow) is the end edge of the line boxes in layout coordinates: a line
 /// that overflows it shows the glyphs that fit before an ellipsis, then the
 /// ellipsis in the line's font and the inline root's colour.
+///
+/// `line_clamp` is the `-webkit-line-clamp` ellipsis of one of the lines,
+/// placed by layout (`BaseDocument::line_clamp_ellipsis`); on that line it
+/// takes the place of `text-overflow`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stroke_text<'a>(
     scene: &mut impl PaintScene,
@@ -756,6 +762,7 @@ pub(crate) fn stroke_text<'a>(
     context: &mut DrawTextContext,
     color_override: Option<Color>,
     ellipsis_edge: Option<f32>,
+    line_clamp: Option<&blitz_dom::node::LineClampEllipsis>,
 ) {
     let DrawTextContext {
         stack,
@@ -776,7 +783,7 @@ pub(crate) fn stroke_text<'a>(
     // ancestor chain on every run, we cache each node's resolved values here and,
     // for each run, only resolve styles for the nodes newly descended into (popping
     // as we ascend). `path_scratch` is a reusable buffer for the run's node path.
-    for line in layout.lines() {
+    for (line_index, line) in layout.lines().enumerate() {
         // Decorations accumulated for this line, keyed by decorating box, so each box is
         // painted once (spanning all its runs) using its own font — matching Firefox, which
         // draws one decoration per box rather than one stepped segment per differently-sized
@@ -786,7 +793,31 @@ pub(crate) fn stroke_text<'a>(
         // Truncation for `text-overflow: ellipsis`: the ellipsis glyph (from the
         // line's first run) and the x up to which glyphs are drawn.
         let mut ellipsis = None;
-        if let Some(edge) = ellipsis_edge {
+        let clamp = line_clamp.filter(|clamp| clamp.line == line_index);
+        if let Some(clamp) = clamp {
+            let font_run = layout
+                .get(clamp.font_run.0)
+                .and_then(|font_line| font_line.items().nth(clamp.font_run.1));
+            if let Some(PositionedLayoutItem::GlyphRun(font_run)) = font_run {
+                let run = font_run.run();
+                let coords: &[i16] = bytemuck::cast_slice(run.normalized_coords());
+                ellipsis = Some(Ellipsis {
+                    font: run.font().font.clone(),
+                    font_size: run.font_size(),
+                    coords: coords.to_vec(),
+                    baseline: line.metrics().baseline
+                        + if has_origins {
+                            text_origins.offset(line, clamp.style_index, scale)
+                        } else {
+                            0.0
+                        },
+                    glyphs: clamp.glyphs.clone(),
+                    advance: clamp.advance,
+                    cutoff: clamp.cutoff.unwrap_or(f32::INFINITY),
+                    visible_end: clamp.x,
+                });
+            }
+        } else if let Some(edge) = ellipsis_edge {
             let runs = || {
                 line.items().filter_map(|item| match item {
                     PositionedLayoutItem::GlyphRun(run) => Some(run),
@@ -826,7 +857,7 @@ pub(crate) fn stroke_text<'a>(
                                 } else {
                                     0.0
                                 },
-                            glyph,
+                            glyphs: vec![(glyph, 0.0)],
                             advance,
                             cutoff,
                             visible_end,
@@ -989,9 +1020,9 @@ pub(crate) fn stroke_text<'a>(
                 1.0,
                 transform,
                 None,
-                std::iter::once(anyrender::Glyph {
-                    id: e.glyph,
-                    x: e.visible_end,
+                e.glyphs.iter().map(|&(id, offset)| anyrender::Glyph {
+                    id,
+                    x: e.visible_end + offset,
                     y: e.baseline,
                 }),
             );

@@ -31,6 +31,36 @@ pub struct TextLayout {
     /// The characters `text-transform` changed, for copying the source text.
     pub(crate) case_reverts: Vec<crate::layout::text_transform::CaseRevert>,
     pub layout: parley::layout::Layout<TextBrush>,
+    /// The `-webkit-line-clamp` ellipsis on one of these lines, set by the
+    /// layout of the clamp root (see `BaseDocument::line_clamp_ellipsis`).
+    pub(crate) line_clamp: Option<Box<LineClampEllipsis>>,
+}
+
+/// The ellipsis that `-webkit-line-clamp` places on the last line before the
+/// clamp point, as Chromium's LineTruncator does. Coordinates are those of
+/// the Parley layout (device pixels).
+#[derive(Clone, Debug)]
+pub struct LineClampEllipsis {
+    /// The clamp root: this block or a block ancestor in its formatting
+    /// context.
+    pub(crate) root: NodeId,
+    /// The index of the clamped line.
+    pub line: usize,
+    /// Glyphs ending after this x are hidden (`None`: the whole line fits
+    /// before the ellipsis).
+    pub cutoff: Option<f32>,
+    /// The inline start of the ellipsis.
+    pub x: f32,
+    /// The style index of the run whose font (the block's primary font) the
+    /// ellipsis is drawn in, and whose baseline it sits on.
+    pub style_index: usize,
+    /// The run in the layout whose font the ellipsis uses: (line, item).
+    pub font_run: (usize, usize),
+    /// The ellipsis glyphs (U+2026, or three full stops if the font lacks it)
+    /// with their offsets from `x`.
+    pub glyphs: Vec<(u32, f32)>,
+    /// The ellipsis advance.
+    pub advance: f32,
 }
 
 impl TextLayout {

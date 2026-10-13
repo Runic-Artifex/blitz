@@ -490,6 +490,7 @@ fn collect_layout_children_with_wrap(
     if let Some(display) = doc.nodes[container_node_id].layout_display_style() {
         *doc.nodes[container_node_id].display_constructed_as_mut() = display;
     }
+    super::line_clamp::report_legacy_box(doc, container_node_id);
 
     // Reset construction flags
     // TODO: make incremental and only remove this if the element is no longer an inline root

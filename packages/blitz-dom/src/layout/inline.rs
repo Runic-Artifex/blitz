@@ -381,6 +381,9 @@ impl BaseDocument {
             // Empty ordinary spans still have observable zero-width fragments, even when the
             // formatting context collapses through and contributes no block height.
             inline_layout.layout.break_all_lines(Some(0.));
+            if inputs.run_mode == RunMode::PerformLayout {
+                inline_layout.line_clamp = None;
+            }
             // Put layout back
             self.nodes[node_id]
                 .data
@@ -964,6 +967,22 @@ impl BaseDocument {
             trailing_empty_line = Some(line_count - 1);
         }
 
+        // A `-webkit-line-clamp` root whose content is this inline formatting
+        // context ends after its clamp line if more lines follow it (Chromium
+        // otherwise lays it out again ignoring the clamp). The later lines
+        // stay laid out, and in the scrollable overflow.
+        let content_height = height;
+        let clamp_line = self.nodes[node_id]
+            .primary_styles()
+            .and_then(|style| super::line_clamp::clamp_lines(&style))
+            .filter(|&lines| {
+                has_inline_content && trailing_empty_line.unwrap_or(line_count) > lines
+            })
+            .map(|lines| lines - 1);
+        if let Some(line) = clamp_line.and_then(|index| inline_layout.layout.get(index)) {
+            height = line.metrics().block_max_coord;
+        }
+
         #[cfg(feature = "floats")]
         {
             if is_bfc_root {
@@ -1166,7 +1185,8 @@ impl BaseDocument {
         let first_baseline = has_inline_content
             .then(|| inline_layout.layout.lines().next().map(line_baseline))
             .flatten();
-        let last_line_index = trailing_empty_line.unwrap_or(line_count).checked_sub(1);
+        let last_line_index =
+            clamp_line.or(trailing_empty_line.unwrap_or(line_count).checked_sub(1));
         let last_baseline = has_inline_content
             .then(|| last_line_index.and_then(|i| inline_layout.layout.get(i)))
             .flatten()
@@ -1185,6 +1205,28 @@ impl BaseDocument {
                 .map(|line| line.metrics().content_block_max_coord / scale)
                 .fold(0.0_f32, f32::max)
         };
+
+        // The clamp line's ellipsis. The ellipsis of a line clamped by a clamp
+        // root around this block is placed by that root's layout.
+        if inputs.run_mode == RunMode::PerformLayout {
+            let mut reports = Vec::new();
+            let edge = (final_size.width - container_pb.horizontal_components().sum()) * scale;
+            inline_layout.line_clamp = clamp_line
+                .and_then(|index| {
+                    self.plan_line_clamp_ellipsis(
+                        node_id,
+                        &inline_layout,
+                        node_id,
+                        index,
+                        edge,
+                        &mut reports,
+                    )
+                })
+                .map(Box::new);
+            for report in reports {
+                self.report_unsupported_layout(report);
+            }
+        }
 
         // Put layout back
         self.nodes[node_id]
@@ -1205,7 +1247,7 @@ impl BaseDocument {
             scrollable_overflow_rect: {
                 let content_extent = taffy::Size {
                     width: content_width,
-                    height: measured_size.height.max(font_content_bottom),
+                    height: (content_height.max(height) / scale).max(font_content_bottom),
                 } + padding.sum_axes();
                 taffy::Rect {
                     left: 0.0,

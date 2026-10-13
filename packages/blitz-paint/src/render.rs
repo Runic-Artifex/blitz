@@ -1112,6 +1112,7 @@ impl ElementCx<'_, '_> {
                 &mut draw_text_context,
                 None,
                 ellipsis_edge,
+                self.context.dom.line_clamp_ellipsis(self.node.id),
             );
         }
     }
@@ -1153,6 +1154,7 @@ impl ElementCx<'_, '_> {
                     &mut draw_text_context,
                     Some(placeholder.color),
                     None,
+                    None,
                 ),
                 _ => crate::text::stroke_text(
                     scene,
@@ -1162,6 +1164,7 @@ impl ElementCx<'_, '_> {
                     self.scale,
                     self.node.id,
                     &mut draw_text_context,
+                    None,
                     None,
                     None,
                 ),
@@ -1194,6 +1197,7 @@ impl ElementCx<'_, '_> {
                         self.node.id,
                         &mut draw_text_context,
                         Some(CONTROL_SELECTION_FOREGROUND),
+                        None,
                         None,
                     );
                     scene.pop_layer();
@@ -1272,6 +1276,7 @@ impl ElementCx<'_, '_> {
                 self.scale,
                 self.node.id,
                 &mut draw_text_context,
+                None,
                 None,
                 None,
             );

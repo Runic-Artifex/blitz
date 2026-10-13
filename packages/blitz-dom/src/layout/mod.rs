@@ -26,6 +26,7 @@ pub(crate) mod construct;
 pub(crate) mod damage;
 mod fieldset;
 pub(crate) mod inline;
+pub(crate) mod line_clamp;
 pub(crate) mod list;
 pub(crate) mod paint_tree;
 pub(crate) mod replaced;
@@ -808,7 +809,17 @@ impl BaseDocument {
             // A fieldset establishes a new block formatting context.
             Display::Block if is_fieldset => compute_block_layout(self, node_id, inputs, None),
             Display::Block => compute_block_layout(self, node_id, inputs, block_ctx),
-            Display::FlowRoot => compute_block_layout(self, node_id, inputs, None),
+            Display::FlowRoot => {
+                let lines = self.nodes[dom_node_id(node_id)]
+                    .primary_styles()
+                    .and_then(|style| line_clamp::clamp_lines(&style));
+                match lines {
+                    Some(lines) => {
+                        self.compute_line_clamp_root_layout(dom_node_id(node_id), inputs, lines)
+                    }
+                    None => compute_block_layout(self, node_id, inputs, None),
+                }
+            }
             Display::Flex if is_flow_button => {
                 let mut output = compute_flexbox_layout(self, node_id, inputs);
                 if inputs.run_mode == RunMode::PerformLayout {
