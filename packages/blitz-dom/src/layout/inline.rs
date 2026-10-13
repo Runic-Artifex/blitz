@@ -754,22 +754,28 @@ impl BaseDocument {
             use style::computed_values::text_wrap_style::T as TextWrapStyle;
             use style::values::specified::TextAlignKeyword;
 
-            // `text-wrap-style: balance` applies to the block container's lines (Blink reads it
-            // from the inline formatting context root). Parley balances them as Blink does, in
-            // device pixels, so the effective zoom includes the scale.
-            let balance = self.nodes[node_id].primary_styles().and_then(|s| {
-                (s.clone_text_wrap_style() == TextWrapStyle::Balance).then(|| BalanceOptions {
+            // `text-wrap-style: balance` and `pretty` apply to the block container's lines (Blink
+            // reads it from the inline formatting context root). Parley breaks them as Blink
+            // does, in device pixels, so the effective zoom includes the scale.
+            let wrap = self.nodes[node_id].primary_styles().map(|s| {
+                let options = BalanceOptions {
                     zoom: s.effective_zoom.value() * scale,
                     justify: s.clone_text_align() == TextAlignKeyword::Justify,
-                })
+                };
+                (s.clone_text_wrap_style(), options)
             });
-            match balance {
-                Some(options) => {
+            match wrap {
+                Some((TextWrapStyle::Balance, options)) => {
                     inline_layout
                         .layout
                         .break_all_lines_balanced(Some(width), options);
                 }
-                None => inline_layout.layout.break_all_lines(Some(width)),
+                Some((TextWrapStyle::Pretty, options)) => {
+                    inline_layout
+                        .layout
+                        .break_all_lines_pretty(Some(width), options);
+                }
+                _ => inline_layout.layout.break_all_lines(Some(width)),
             }
         }
 
@@ -1246,7 +1252,8 @@ fn round_up_width(width: f32, scale: f32, whole_pixels: bool) -> f32 {
 #[cfg(test)]
 mod text_wrap_balance_tests {
     //! Lines as Chromium 153 breaks them in DejaVu Sans at 16px, with
-    //! `text-wrap: wrap` and `text-wrap: balance` on the paragraph.
+    //! `text-wrap: wrap`, `text-wrap: balance` and `text-wrap: pretty` on the
+    //! paragraph.
 
     use blitz_traits::shell::{ColorScheme, Viewport};
 
@@ -1388,16 +1395,133 @@ mod text_wrap_balance_tests {
         );
     }
 
-    /// `pretty` is not parsed (the compiler reports it), and `stable` breaks
-    /// greedily.
+    /// `stable` breaks greedily.
     #[test]
-    fn other_wrap_styles_stay_greedy() {
-        for style in ["text-wrap:pretty", "text-wrap-style:stable"] {
-            assert_eq!(
-                lines(&format!("width:300px;{style}"), None, HEADING, 1.0),
-                HEADING_GREEDY,
-                "{style}"
-            );
-        }
+    fn stable_stays_greedy() {
+        assert_eq!(
+            lines("width:208px;text-wrap-style:stable", None, HEADING, 1.0),
+            HEADING_PRETTY_GREEDY
+        );
+    }
+
+    const HEADING_PRETTY_GREEDY: [&str; 3] = [
+        "Balanced headings avoid",
+        "a lonely last word at the",
+        "end",
+    ];
+    const HEADING_PRETTY: [&str; 3] = [
+        "Balanced headings avoid",
+        "a lonely last word at",
+        "the end",
+    ];
+
+    /// `pretty` keeps a single short word off the last line of each paragraph,
+    /// rebreaking only its last four lines.
+    #[test]
+    fn pretty_breaks_lines_as_chromium() {
+        assert_eq!(
+            lines("width:208px", None, HEADING, 1.0),
+            HEADING_PRETTY_GREEDY
+        );
+        assert_eq!(
+            lines("width:208px;text-wrap:pretty", None, HEADING, 1.0),
+            HEADING_PRETTY
+        );
+        let fox = "The quick brown fox jumps over the lazy dog and keeps running far away";
+        assert_eq!(
+            lines("width:205px;text-wrap:pretty", None, fox, 1.0),
+            [
+                "The quick brown fox",
+                "jumps over the lazy",
+                "dog and keeps running",
+                "far away"
+            ]
+        );
+        let long = "Chromium optimizes only the last four lines of a paragraph when it lays out text with pretty wrapping, so the earlier lines of this long paragraph keep their greedy breaks and only the end moves";
+        assert_eq!(
+            lines("width:263px;text-wrap-style:pretty", None, long, 1.0),
+            [
+                "Chromium optimizes only the",
+                "last four lines of a paragraph",
+                "when it lays out text with pretty",
+                "wrapping, so the earlier lines of",
+                "this long paragraph keep their",
+                "greedy breaks and only the",
+                "end moves"
+            ]
+        );
+    }
+
+    /// A last line of a third of the width or more stays greedy.
+    #[test]
+    fn pretty_keeps_a_long_last_line() {
+        assert_eq!(
+            lines("width:300px;text-wrap:pretty", None, HEADING, 1.0),
+            HEADING_GREEDY
+        );
+    }
+
+    /// Each paragraph up to a forced break is rebroken on its own.
+    #[test]
+    fn pretty_breaks_each_paragraph() {
+        let text = "The first paragraph also avoids an orphan at its end\nand the second paragraph after the forced break does so too";
+        assert_eq!(
+            lines("width:205px;white-space:pre-line", None, text, 1.0),
+            [
+                "The first paragraph also",
+                "avoids an orphan at its",
+                "end",
+                "and the second",
+                "paragraph after the",
+                "forced break does so too"
+            ]
+        );
+        assert_eq!(
+            lines(
+                "width:205px;white-space:pre-line;text-wrap:pretty",
+                None,
+                text,
+                1.0
+            ),
+            [
+                "The first paragraph also",
+                "avoids an orphan at",
+                "its end",
+                "and the second",
+                "paragraph after the",
+                "forced break does so too"
+            ]
+        );
+    }
+
+    /// Breaking in device pixels at a device pixel ratio of 2 gives the same lines.
+    #[test]
+    fn pretty_breaks_lines_as_chromium_at_dpr_2() {
+        assert_eq!(
+            lines("width:208px", None, HEADING, 2.0),
+            HEADING_PRETTY_GREEDY
+        );
+        assert_eq!(
+            lines("width:208px;text-wrap:pretty", None, HEADING, 2.0),
+            HEADING_PRETTY
+        );
+    }
+
+    /// The paragraph's text-wrap-style applies, not an inline's.
+    #[test]
+    fn pretty_follows_the_block_container() {
+        assert_eq!(
+            lines("width:208px", Some("text-wrap-style:pretty"), HEADING, 1.0),
+            HEADING_PRETTY_GREEDY
+        );
+        assert_eq!(
+            lines(
+                "width:208px;text-wrap:pretty",
+                Some("text-wrap-style:auto"),
+                HEADING,
+                1.0
+            ),
+            HEADING_PRETTY
+        );
     }
 }
