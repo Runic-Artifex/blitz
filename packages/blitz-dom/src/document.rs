@@ -9,7 +9,7 @@ use crate::net::{
 use crate::node::{ImageData, NodeFlags, RasterImageData, SpecialElementData, Status, TextBrush};
 use crate::scrolling::ScrollAnimationState;
 use crate::selection::TextSelection;
-use crate::stylo_device::{DeviceChanges, make_device};
+use crate::stylo_device::{DeviceChanges, MediaPreferences, make_device};
 use crate::stylo_to_cursor_icon::stylo_to_cursor_icon;
 use crate::traversal::TreeTraverser;
 use crate::url::DocumentUrl;
@@ -162,6 +162,73 @@ mod document_mode_tests {
             doc.flush_pending_device_changes();
             assert_eq!(doc.stylist.device().quirks_mode(), mode);
         }
+    }
+
+    /// `prefers-reduced-motion`, `prefers-contrast` and `forced-colors` match
+    /// as in a browser without these preferences (Chromium 153 on Linux
+    /// without a desktop setting), and follow `set_media_preferences`.
+    #[test]
+    fn user_preference_media_queries() {
+        use crate::{Attribute, PrefersContrast, PrefersReducedMotion, qual_name};
+        let mut doc = BaseDocument::new(DocumentConfig::default());
+        doc.add_user_agent_stylesheet(
+            "html,body,div{display:block}
+             @media (prefers-reduced-motion: no-preference) { #a { width: 1px } }
+             @media (prefers-reduced-motion: reduce) { #a { width: 2px } }
+             @media (prefers-reduced-motion) { #a { height: 3px } }
+             @media (prefers-contrast: no-preference) { #b { width: 1px } }
+             @media (prefers-contrast: more) { #b { width: 2px } }
+             @media (prefers-contrast) { #b { height: 3px } }
+             @media (forced-colors: none) { #c { width: 1px } }
+             @media (forced-colors: active) { #c { width: 2px } }
+             @media (forced-colors) { #c { height: 3px } }",
+        );
+        let root_id = doc.root_node().id;
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![]);
+        let body = mutator.create_element(qual_name!("body"), vec![]);
+        let ids: Vec<_> = ["a", "b", "c"]
+            .into_iter()
+            .map(|id| {
+                mutator.create_element(
+                    qual_name!("div"),
+                    vec![Attribute {
+                        name: qual_name!("id"),
+                        value: id.into(),
+                    }],
+                )
+            })
+            .collect();
+        mutator.append_children(body, &ids);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root_id, &[html]);
+        drop(mutator);
+        let size = |doc: &BaseDocument, id: NodeId| {
+            let style = doc.nodes[id].primary_styles().unwrap();
+            let px = |v: &style::values::computed::Size| match v {
+                style::values::generics::length::GenericSize::LengthPercentage(lp) => {
+                    lp.0.to_length().unwrap().px()
+                }
+                _ => 0.0,
+            };
+            (px(&style.clone_width()), px(&style.clone_height()))
+        };
+        doc.resolve(0.0);
+        assert_eq!(size(&doc, ids[0]), (1.0, 0.0));
+        assert_eq!(size(&doc, ids[1]), (1.0, 0.0));
+        assert_eq!(size(&doc, ids[2]), (1.0, 0.0));
+        doc.set_media_preferences(MediaPreferences {
+            reduced_motion: PrefersReducedMotion::Reduce,
+            contrast: PrefersContrast::More,
+        });
+        doc.resolve(0.0);
+        assert_eq!(size(&doc, ids[0]), (2.0, 3.0));
+        assert_eq!(size(&doc, ids[1]), (2.0, 3.0));
+        assert_eq!(size(&doc, ids[2]), (1.0, 0.0));
+        doc.set_media_preferences(MediaPreferences::default());
+        doc.resolve(0.0);
+        assert_eq!(size(&doc, ids[0]), (1.0, 0.0));
+        assert_eq!(size(&doc, ids[1]), (1.0, 0.0));
     }
 }
 
@@ -318,6 +385,9 @@ pub struct BaseDocument {
     pub(crate) viewport: Viewport,
     /// CSS media type used to evaluate `@media` rules.
     pub(crate) media_type: MediaType,
+    /// The user preferences `@media` rules see (`prefers-reduced-motion`,
+    /// `prefers-contrast`); no preference unless the embedder sets them.
+    pub(crate) media_preferences: MediaPreferences,
     /// Changes to the stylist [`Device`] that have been requested since the
     /// last [`resolve`](Self::resolve), to be applied (coalesced into a single
     /// device rebuild) at the start of the next resolve.
@@ -580,6 +650,7 @@ impl BaseDocument {
             nodes_to_id,
             viewport,
             media_type,
+            media_preferences: MediaPreferences::default(),
             pending_device_changes: DeviceChanges::empty(),
             style_threading: config.style_threading,
             incremental_layout: config.incremental.unwrap_or(true),
@@ -2388,6 +2459,22 @@ impl BaseDocument {
         self.queue_device_changes(DeviceChanges::MEDIA_TYPE);
     }
 
+    /// Sets the user preferences used to evaluate `@media` rules
+    /// (`prefers-reduced-motion`, `prefers-contrast`) and queues a stylist
+    /// device rebuild so updated rules apply on the next restyle.
+    pub fn set_media_preferences(&mut self, preferences: MediaPreferences) {
+        if self.media_preferences == preferences {
+            return;
+        }
+        self.media_preferences = preferences;
+        self.queue_device_changes(DeviceChanges::MEDIA_PREFERENCES);
+    }
+
+    /// The user preferences `@media` rules see.
+    pub fn media_preferences(&self) -> MediaPreferences {
+        self.media_preferences
+    }
+
     pub fn viewport(&self) -> &Viewport {
         &self.viewport
     }
@@ -2485,12 +2572,14 @@ impl BaseDocument {
             return;
         }
 
-        self.set_stylist_device(make_device(
+        let mut device = make_device(
             &self.viewport,
             self.media_type.clone(),
             self.quirks_mode(),
             self.font_ctx.clone(),
-        ));
+        );
+        self.media_preferences.apply(&mut device);
+        self.set_stylist_device(device);
         self.scroll_viewport_by(0.0, 0.0); // Clamp scroll offset
 
         // Text is shaped at a specific scale factor, so cached inline layouts

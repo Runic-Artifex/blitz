@@ -16,7 +16,7 @@ use style::media_queries::MediaType;
 use style::properties::ComputedValues;
 use style::properties::style_structs::Font;
 use style::queries::values::PrefersColorScheme;
-use style::servo::media_features::PointerCapabilities;
+use style::servo::media_features::{PointerCapabilities, PrefersContrast, PrefersReducedMotion};
 
 use crate::font_metrics::BlitzFontMetricsProvider;
 
@@ -41,6 +41,8 @@ bitflags! {
         const MEDIA_TYPE = 0b0000_1000;
         /// The document's compatibility mode changed.
         const QUIRKS_MODE = 0b0001_0000;
+        /// The user preferences media queries see changed.
+        const MEDIA_PREFERENCES = 0b0010_0000;
     }
 }
 
@@ -59,6 +61,24 @@ impl DeviceChanges {
             changes |= Self::COLOR_SCHEME;
         }
         changes
+    }
+}
+
+/// The user preferences `@media` rules see beside the color scheme (which
+/// is part of the [`Viewport`]). The default is no preference, what a
+/// browser reports without a desktop setting for them.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MediaPreferences {
+    /// `prefers-reduced-motion`.
+    pub reduced_motion: PrefersReducedMotion,
+    /// `prefers-contrast`.
+    pub contrast: PrefersContrast,
+}
+
+impl MediaPreferences {
+    pub(crate) fn apply(&self, device: &mut Device) {
+        device.set_prefers_reduced_motion(self.reduced_motion);
+        device.set_prefers_contrast(self.contrast);
     }
 }
 
