@@ -3,7 +3,11 @@ use selectors::context::QuirksMode;
 use std::sync::atomic::Ordering as Ao;
 use std::{
     io::Cursor,
-    sync::{Arc, atomic::AtomicUsize, mpsc::Sender},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize},
+        mpsc::Sender,
+    },
 };
 use style::{
     font_face::{FontFaceSourceFormat, FontFaceSourceFormatKeyword, FontStyleRange, Source},
@@ -55,7 +59,16 @@ pub struct FontFaceOverrides {
     /// `unicode-range` descriptor as inclusive code point ranges; a rule
     /// without one covers every code point (U+0-10FFFF).
     pub unicode_range: Option<Vec<(u32, u32)>>,
+    /// The rule's position among the `@font-face` rules Blitz has fetched,
+    /// so that a family's faces are ordered by their rules, not by when
+    /// their sources finish loading.
+    pub order: Option<u64>,
 }
+
+/// The `@font-face` rules fetched so far, in the order they are fetched: the
+/// order of the rules in a stylesheet, stylesheets in the order they are
+/// processed.
+static FONT_FACE_ORDER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 pub enum Resource {
@@ -443,6 +456,7 @@ pub(crate) fn fetch_font_face_rules<'a>(
                     }),
                     style: descriptor.font_style.as_ref().map(stylo_to_fontique_style),
                     unicode_range: Some(unicode_ranges(descriptor.unicode_range.as_deref())),
+                    order: Some(FONT_FACE_ORDER.fetch_add(1, Ao::Relaxed)),
                     ..Default::default()
                 };
                 Some((src, overrides))

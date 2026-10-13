@@ -250,6 +250,8 @@ mod unicode_range_tests {
     //!   then the bullet font for U+2190-21FF.
     //! - Order: bullet font, then DejaVu Sans, both for U+2000-206F.
     //! - Range: DejaVu Sans without a range, then the bullet font for U+0000-00FF.
+    //! - Loaded: the rules of Order, registered in the other order (as their
+    //!   sources finish loading); Chromium orders the faces by their rules.
 
     use blitz_traits::shell::{ColorScheme, Viewport};
 
@@ -274,6 +276,18 @@ mod unicode_range_tests {
     /// Register a face as an `@font-face` rule with `family` and `range`
     /// would, in definition order.
     fn face(doc: &mut BaseDocument, family: &str, bytes: &[u8], range: Option<(u32, u32)>) {
+        loaded_face(doc, family, bytes, range, None);
+    }
+
+    /// Register a face as `face` does, with the position of its rule among
+    /// the `@font-face` rules (`order`), as `fetch_font_face_rules` gives it.
+    fn loaded_face(
+        doc: &mut BaseDocument,
+        family: &str,
+        bytes: &[u8],
+        range: Option<(u32, u32)>,
+        order: Option<u64>,
+    ) {
         doc.load_resource(ResourceLoadResponse {
             request_id: 0,
             node_id: None,
@@ -285,6 +299,7 @@ mod unicode_range_tests {
                     // `fetch_font_face_rules` gives a rule without the
                     // descriptor the whole range.
                     unicode_range: Some(vec![range.unwrap_or((0, 0x10FFFF))]),
+                    order,
                     ..Default::default()
                 },
             )),
@@ -310,6 +325,9 @@ mod unicode_range_tests {
         face(&mut doc, "Order", DEJAVU, Some((0x2000, 0x206F)));
         face(&mut doc, "Range", DEJAVU, None);
         face(&mut doc, "Range", bullet, Some((0, 0xFF)));
+        // The rules of Order, their sources loaded in the other order.
+        loaded_face(&mut doc, "Loaded", DEJAVU, Some((0x2000, 0x206F)), Some(1));
+        loaded_face(&mut doc, "Loaded", bullet, Some((0x2000, 0x206F)), Some(0));
 
         let root = doc.root_node().id;
         let mut mutator = doc.mutate();
@@ -365,7 +383,8 @@ mod unicode_range_tests {
     /// A character takes the latest-defined face whose range includes it, and
     /// a face whose range excludes it is no candidate even if it has the
     /// glyph. Chromium sets "•••" in DejaVu Sans (35.390625 px at 20px; the
-    /// bullet font's are 33.640625 px) in both families.
+    /// bullet font's are 33.640625 px) in both families, and in Loaded, whose
+    /// faces were registered out of their rules' order.
     #[test]
     fn characters_take_the_latest_face_whose_range_includes_them() {
         const SPAN: &str = "display:inline-block;font-size:20px;font-family:";
@@ -375,8 +394,9 @@ mod unicode_range_tests {
                 ("span", &[("style", &format!("{SPAN}Order"))], bullets),
                 ("span", &[("style", &format!("{SPAN}Range"))], bullets),
                 ("span", &[("style", &format!("{SPAN}PlainDejaVu"))], bullets),
+                ("span", &[("style", &format!("{SPAN}Loaded"))], bullets),
             ]),
-            [35.390625, 35.390625, 35.390625]
+            [35.390625, 35.390625, 35.390625, 35.390625]
         );
     }
 }
