@@ -51,6 +51,8 @@ impl From<StyloBackgroundClip> for BoxModelBox {
 
             // TODO: support BorderArea
             StyloBackgroundClip::BorderArea => Self::BorderBox,
+            // Clipped to the text within the border box (`ElementCx::with_text_clip`).
+            StyloBackgroundClip::Text => Self::BorderBox,
         }
     }
 }
@@ -89,6 +91,8 @@ pub(super) struct ImageLayerStyles<'a> {
     pub repeat: &'a BackgroundRepeat,
     pub size: &'a BackgroundSize,
     pub clip: BoxModelBox,
+    /// `background-clip: text`: also clipped to the element's text.
+    pub clip_text: bool,
     pub origin: BoxModelBox,
     pub attachment: StyloBackgroundAttachment,
 }
@@ -107,6 +111,7 @@ impl<'a> ImageLayerStyles<'a> {
             repeat: get_cyclic(&bg_styles.background_repeat.0, idx),
             size: get_cyclic(&bg_styles.background_size.0, idx),
             clip: (*get_cyclic(&bg_styles.background_clip.0, idx)).into(),
+            clip_text: *get_cyclic(&bg_styles.background_clip.0, idx) == StyloBackgroundClip::Text,
             origin: (*get_cyclic(&bg_styles.background_origin.0, idx)).into(),
             attachment: *get_cyclic(&bg_styles.background_attachment.0, idx),
         }
@@ -125,6 +130,7 @@ impl<'a> ImageLayerStyles<'a> {
             repeat: get_cyclic(&svg_styles.mask_repeat.0, idx),
             size: get_cyclic(&svg_styles.mask_size.0, idx),
             clip: (*get_cyclic(&svg_styles.mask_clip.0, idx)).into(),
+            clip_text: false,
             origin: (*get_cyclic(&svg_styles.mask_origin.0, idx)).into(),
             // There is no `mask-attachment` property
             attachment: StyloBackgroundAttachment::Scroll,
@@ -239,7 +245,15 @@ impl ElementCx<'_, '_> {
         }
 
         // Draw background color (if any)
-        self.draw_solid_bg(scene, &background_clip_path);
+        let color_clip_text =
+            *get_cyclic(&bg_styles.background_clip.0, layer_count - 1) == StyloBackgroundClip::Text;
+        if color_clip_text {
+            self.with_text_clip(scene, |scene| {
+                self.draw_solid_bg(scene, &background_clip_path)
+            });
+        } else {
+            self.draw_solid_bg(scene, &background_clip_path);
+        }
 
         for idx in (0..layer_count).rev() {
             let layer = ImageLayerStyles::from_background(bg_styles, image_data, idx);
@@ -247,6 +261,14 @@ impl ElementCx<'_, '_> {
                 continue;
             }
             let background_clip_path = self.box_path(layer.clip);
+            if layer.clip_text {
+                self.with_text_clip(scene, |scene| {
+                    scene.push_clip_layer(Fill::NonZero, self.transform, &background_clip_path);
+                    self.draw_image_layer(scene, &layer);
+                    scene.pop_layer();
+                });
+                continue;
+            }
 
             if let Some(mode) = layer_blend(idx) {
                 scene.push_layer(
@@ -600,6 +622,66 @@ impl ElementCx<'_, '_> {
                 scene.fill(Fill::NonZero, self.transform, *color, None, &shape);
             }
         }
+    }
+
+    /// Paint what `draw` paints through the glyphs of the element's own
+    /// inline formatting context (`background-clip: text`): an isolated layer
+    /// whose content is kept only where the glyphs, drawn in a nested
+    /// destination-in layer, cover it. Text of block or atomic inline
+    /// descendants is not part of the mask (Blitz reports such elements at
+    /// layout), nor are text decorations.
+    fn with_text_clip<S: PaintScene>(&self, scene: &mut S, draw: impl FnOnce(&mut S)) {
+        if !self.node.flags.is_inline_root() {
+            return;
+        }
+        let Some(text_layout) = self.element.inline_layout_data.as_ref() else {
+            return;
+        };
+        let border_box = self.frame.border_box_path();
+        scene.push_layer(
+            Fill::NonZero,
+            peniko::Mix::Normal,
+            1.0,
+            self.transform,
+            &border_box,
+            None,
+            None,
+        );
+        draw(scene);
+        scene.push_layer(
+            Fill::NonZero,
+            peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::DestIn),
+            1.0,
+            self.transform,
+            &border_box,
+            None,
+            None,
+        );
+        let layout = self.node.final_layout();
+        let scroll = self.node.scroll_offset();
+        let x = (layout.padding.left + layout.border.left) as f64 - scroll.x;
+        let y = (layout.padding.top + layout.border.top) as f64 - scroll.y;
+        let transform = self.transform * Affine::translate((x * self.scale, y * self.scale));
+        let ellipsis_edge = (self.node.clips_overflow()
+            && matches!(
+                self.style.clone_text_overflow().second,
+                style::values::specified::text::TextOverflowSide::Ellipsis
+            ))
+        .then(|| (layout.content_box_width() as f64 * self.scale) as f32);
+        let mut context = self.context.draw_text_context.borrow_mut();
+        crate::text::stroke_text_mask(
+            scene,
+            &text_layout.layout,
+            self.context.dom,
+            transform,
+            self.scale,
+            self.node.id,
+            &mut context,
+            ellipsis_edge,
+            self.context.dom.line_clamp_ellipsis(self.node.id),
+        );
+        scene.pop_layer();
+        scene.pop_layer();
     }
 
     fn draw_solid_bg(&self, scene: &mut impl PaintScene, shape: &BezPath) {

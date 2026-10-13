@@ -261,6 +261,11 @@ impl BaseDocument {
                 {
                     edge_reports.push(stylo_to_parley::INLINE_STICKY);
                 }
+                if computed.get_background().background_clip.0.iter().any(|clip| {
+                    *clip == style::properties::generated::longhands::background_clip::single_value::computed_value::T::Text
+                }) {
+                    edge_reports.push(super::construct::BACKGROUND_CLIP_TEXT_DESCENDANTS);
+                }
                 let (edges, unsupported) = stylo_to_parley::inline_span_edges(&computed, scale);
                 edge_reports.extend(unsupported);
                 if edges.is_zero() {

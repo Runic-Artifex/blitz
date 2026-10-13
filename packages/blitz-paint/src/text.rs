@@ -278,8 +278,9 @@ struct ResolvedDecoration {
 /// consecutive runs doesn't re-resolve them.
 struct DecorationStackEntry {
     node_id: NodeId,
-    /// This node's (inherited) text colour, used for the glyphs of runs whose
-    /// innermost node is this one.
+    /// This node's (inherited) text fill colour (`-webkit-text-fill-color`,
+    /// `color` unless set), used for the glyphs of runs whose innermost node is
+    /// this one.
     text_color: Color,
     /// The decoration this node introduces as a decorating box, if any.
     decoration: Option<ResolvedDecoration>,
@@ -297,7 +298,13 @@ fn resolve_decoration_entry(doc: &BaseDocument, node_id: NodeId) -> DecorationSt
 
     let itext = styles.get_inherited_text();
     let text = styles.get_text();
-    let text_color = itext.color.as_color_color();
+    // Glyphs are filled with `-webkit-text-fill-color` (initially
+    // `currentcolor`), and Blink resolves a decoration's `currentcolor` to
+    // that fill colour too (a transparent fill hides the underline).
+    let text_color = itext
+        ._webkit_text_fill_color
+        .resolve_to_absolute(&itext.color)
+        .as_color_color();
 
     let drawn_lines = TextDecorationLine::UNDERLINE
         | TextDecorationLine::OVERLINE
@@ -308,7 +315,7 @@ fn resolve_decoration_entry(doc: &BaseDocument, node_id: NodeId) -> DecorationSt
     let is_contents = styles.clone_display().is_contents();
     let decoration = (!is_contents && line.intersects(drawn_lines)).then(|| {
         // `text-decoration-color: currentColor` (the initial value) resolves against
-        // the decorating box's own colour, not the descendant run's.
+        // the decorating box's own fill colour, not the descendant run's.
         let color = text
             .text_decoration_color
             .as_absolute()
@@ -752,6 +759,7 @@ fn ellipsis_glyph(font: &parley::FontData, font_size: f32, coords: &[i16]) -> Op
 /// placed by layout (`BaseDocument::line_clamp_ellipsis`); on that line it
 /// takes the place of `text-overflow`.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stroke_text<'a>(
     scene: &mut impl PaintScene,
     layout: &'a Layout<TextBrush>,
@@ -763,6 +771,64 @@ pub(crate) fn stroke_text<'a>(
     color_override: Option<Color>,
     ellipsis_edge: Option<f32>,
     line_clamp: Option<&blitz_dom::node::LineClampEllipsis>,
+) {
+    stroke_text_impl(
+        scene,
+        layout,
+        doc,
+        transform,
+        scale,
+        inline_root_id,
+        context,
+        color_override,
+        ellipsis_edge,
+        line_clamp,
+        false,
+    );
+}
+
+/// The glyphs `stroke_text` draws (with its ellipsis), in opaque black and
+/// without decorations: the mask `background-clip: text` paints through.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stroke_text_mask<'a>(
+    scene: &mut impl PaintScene,
+    layout: &'a Layout<TextBrush>,
+    doc: &BaseDocument,
+    transform: Affine,
+    scale: f64,
+    inline_root_id: NodeId,
+    context: &mut DrawTextContext,
+    ellipsis_edge: Option<f32>,
+    line_clamp: Option<&blitz_dom::node::LineClampEllipsis>,
+) {
+    stroke_text_impl(
+        scene,
+        layout,
+        doc,
+        transform,
+        scale,
+        inline_root_id,
+        context,
+        Some(Color::BLACK),
+        ellipsis_edge,
+        line_clamp,
+        true,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stroke_text_impl<'a>(
+    scene: &mut impl PaintScene,
+    layout: &'a Layout<TextBrush>,
+    doc: &BaseDocument,
+    transform: Affine,
+    scale: f64,
+    inline_root_id: NodeId,
+    context: &mut DrawTextContext,
+    color_override: Option<Color>,
+    ellipsis_edge: Option<f32>,
+    line_clamp: Option<&blitz_dom::node::LineClampEllipsis>,
+    glyph_mask: bool,
 ) {
     let DrawTextContext {
         stack,
@@ -974,7 +1040,7 @@ pub(crate) fn stroke_text<'a>(
                 }
 
                 for entry in stack.iter() {
-                    if entry.decoration.is_none() {
+                    if glyph_mask || entry.decoration.is_none() {
                         continue;
                     }
                     let idx = match deco_boxes.iter().position(|d| d.node_id == entry.node_id) {
@@ -1028,6 +1094,9 @@ pub(crate) fn stroke_text<'a>(
             );
         }
 
+        if glyph_mask {
+            continue;
+        }
         flush_line_decorations(
             scene,
             transform,

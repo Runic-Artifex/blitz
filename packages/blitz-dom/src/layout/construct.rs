@@ -480,7 +480,41 @@ fn move_rendered_legend_first(
         .insert(NodeFlags::HAS_RENDERED_LEGEND);
 }
 
+/// `background-clip: text` paints a background through the glyphs of the
+/// element's own inline formatting context (Blitz's paint); Chromium also
+/// clips to the text of block and atomic inline descendants. Those are
+/// reported.
+pub(crate) const BACKGROUND_CLIP_TEXT_DESCENDANTS: &str = "background-clip: text on an element whose text is not all in its own inline formatting context (block or atomic inline descendants, or an ordinary inline box), which Blitz does not clip the background to";
+
+fn has_text_clip(doc: &BaseDocument, node_id: NodeId) -> bool {
+    use style::properties::generated::longhands::background_clip::single_value::computed_value::T as Clip;
+    doc.nodes[node_id].primary_styles().is_some_and(|style| {
+        !style.clone_display().is_contents()
+            && style
+                .get_background()
+                .background_clip
+                .0
+                .iter()
+                .any(|clip| *clip == Clip::Text)
+    })
+}
+
 fn collect_layout_children_with_wrap(
+    doc: &mut BaseDocument,
+    container_node_id: NodeId,
+    out: &mut LayoutChildren,
+    wrap: Option<WrapContext>,
+) {
+    let text_clip = has_text_clip(doc, container_node_id);
+    collect_layout_children_with_wrap_inner(doc, container_node_id, out, wrap);
+    if text_clip
+        && (!doc.nodes[container_node_id].flags.is_inline_root() || !out.children.is_empty())
+    {
+        doc.report_unsupported_layout(BACKGROUND_CLIP_TEXT_DESCENDANTS);
+    }
+}
+
+fn collect_layout_children_with_wrap_inner(
     doc: &mut BaseDocument,
     container_node_id: NodeId,
     out: &mut LayoutChildren,
