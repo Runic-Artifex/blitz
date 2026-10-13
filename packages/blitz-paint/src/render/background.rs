@@ -190,6 +190,11 @@ impl ElementCx<'_, '_> {
                 &self.frame.padding_box_path(),
             );
         }
+        // A cell that is a stacking context (a sticky column cell) carries the
+        // column, row group and row backgrounds behind it, under its own.
+        if self.style.clone_display().inside() == DisplayInside::TableCell {
+            self.draw_table_part_backgrounds(scene);
+        }
         let bg_styles = &self.style.get_background();
         let image_data = &self.element.background_images;
         let layer_count = bg_styles.background_image.0.len();
@@ -391,9 +396,85 @@ impl ElementCx<'_, '_> {
     /// `border-spacing` between them, nor where a row has no cell), so they are
     /// painted cell by cell.
     pub(super) fn draw_table_row_backgrounds(&self, scene: &mut impl PaintScene) {
-        let SpecialElementData::TableRoot(table) = &self.element.special_data else {
+        // A cell that is a stacking context paints them under its own
+        // background (`draw_background`).
+        if self.style.clone_display().inside()
+            == style::values::specified::box_::DisplayInside::TableCell
+        {
+            return;
+        }
+        self.draw_table_part_backgrounds(scene);
+    }
+
+    /// The table root of an internal table element.
+    fn table_root(&self) -> Option<NodeId> {
+        let mut current = self.node.layout_parent.get();
+        while let Some(id) = current {
+            let node = self.context.dom.get_node(id)?;
+            if let Some(SpecialElementData::TableRoot(_)) =
+                node.element_data().map(|e| &e.special_data)
+            {
+                return Some(id);
+            }
+            current = node.layout_parent.get();
+        }
+        None
+    }
+
+    /// The node that paints the table-part backgrounds behind `cell`: the
+    /// nearest stacking context among the cell, its row and its row group
+    /// (Blink paints them in that part's layer, so they move with a sticky
+    /// header row group or column cell), else the table root.
+    fn table_part_painter(&self, cell: NodeId, table_id: NodeId) -> NodeId {
+        let mut current = Some(cell);
+        while let Some(id) = current {
+            if id == table_id {
+                break;
+            }
+            let Some(node) = self.context.dom.get_node(id) else {
+                break;
+            };
+            if node.is_stacking_context_root(false) {
+                return id;
+            }
+            current = node.layout_parent.get();
+        }
+        table_id
+    }
+
+    /// Paint the table-part backgrounds this element owns (see
+    /// `table_part_painter`): for the table root those behind the cells no
+    /// stacking context inside the table holds, for an internal table element
+    /// that is a stacking context those behind its own cells.
+    pub(super) fn draw_table_part_backgrounds(&self, scene: &mut impl PaintScene) {
+        let table_id = match &self.element.special_data {
+            SpecialElementData::TableRoot(_) => self.node.id,
+            _ if matches!(
+                self.style.clone_display().inside(),
+                style::values::specified::box_::DisplayInside::TableRow
+                    | style::values::specified::box_::DisplayInside::TableRowGroup
+                    | style::values::specified::box_::DisplayInside::TableHeaderGroup
+                    | style::values::specified::box_::DisplayInside::TableFooterGroup
+                    | style::values::specified::box_::DisplayInside::TableCell
+            ) && self.node.is_stacking_context_root(false) =>
+            {
+                match self.table_root() {
+                    Some(root) => root,
+                    None => return,
+                }
+            }
+            _ => return,
+        };
+        let Some(SpecialElementData::TableRoot(table)) = self
+            .context
+            .dom
+            .get_node(table_id)
+            .and_then(|node| node.element_data())
+            .map(|element| &element.special_data)
+        else {
             return;
         };
+        let painter = self.node.id;
 
         let background_color = |node_id: NodeId| -> Option<Color> {
             let node = self.context.dom.get_node(node_id)?;
@@ -441,7 +522,7 @@ impl ElementCx<'_, '_> {
             let mut y = layout.location.y;
             let mut parent = cell.layout_parent.get();
             while let Some(id) = parent {
-                if id == self.node.id {
+                if id == table_id {
                     break;
                 }
                 let node = self.context.dom.get_node(id)?;
@@ -449,7 +530,8 @@ impl ElementCx<'_, '_> {
                 y += node.final_layout().location.y;
                 parent = node.layout_parent.get();
             }
-            // This context is translated to the grid box, below top captions.
+            // The table root's context is translated to the grid box, below
+            // top captions.
             y -= table.grid_rect.borrow().location.y;
             Some(Rect::new(
                 x as f64,
@@ -478,7 +560,19 @@ impl ElementCx<'_, '_> {
         let before = Size::new((gutter.width / 2.0).ceil(), (gutter.height / 2.0).ceil());
         let after = gutter - before;
 
+        // A part's context is translated to its own border box.
+        let origin = if painter == table_id {
+            Vec2::ZERO
+        } else {
+            match cell_rect(painter) {
+                Some(rect) => rect.origin().to_vec2(),
+                None => return,
+            }
+        };
         for cell in &table.cells {
+            if self.table_part_painter(cell.node_id, table_id) != painter {
+                continue;
+            }
             let no_colors = [None, None];
             let column = column_colors
                 .get(cell.column as usize)
@@ -501,7 +595,7 @@ impl ElementCx<'_, '_> {
                 .intersect(bounds);
             }
 
-            let shape = rect.scale_from_origin(self.scale);
+            let shape = (rect - origin).scale_from_origin(self.scale);
             for color in colors {
                 scene.fill(Fill::NonZero, self.transform, *color, None, &shape);
             }
