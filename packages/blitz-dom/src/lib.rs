@@ -65,6 +65,10 @@ mod resolve;
 /// Computation of resolved CSS property values (`getComputedStyle()`)
 mod resolved_style;
 mod scroll_anchor;
+#[cfg(test)]
+mod scroll_timeline_tests;
+/// Scroll-driven animations: sampling their scroll timelines.
+mod scroll_timelines;
 /// Scrolling of nodes and the viewport, and scroll animations.
 mod scrolling;
 mod selection;
@@ -114,6 +118,7 @@ pub use markup5ever::{
 pub use mutator::DocumentMutator;
 pub use node::{Attribute, DocumentData, ElementData, Node, NodeData, TextNodeData};
 pub use parley::FontContext;
+pub use scroll_timelines::{ScrollDrivenAnimation, UnsupportedScrollDriven};
 pub use scrolling::{ScrollBehavior, ScrollLogicalPosition};
 pub use style::servo::media_features::{PrefersContrast, PrefersReducedMotion};
 pub use stylo_device::MediaPreferences;

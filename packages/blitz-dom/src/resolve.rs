@@ -36,6 +36,12 @@ use crate::{
 /// Restyle and layout passes per resolve for container queries (nested containers).
 const MAX_CONTAINER_QUERY_PASSES: usize = 4;
 
+/// Restyle and layout passes per resolve for scroll-driven animations whose
+/// timeline samples changed with layout. Should an animation keep changing
+/// its own timeline (it changes the layout of its scroller), the next frame
+/// continues from the last samples.
+const MAX_SCROLL_TIMELINE_PASSES: usize = 4;
+
 impl BaseDocument {
     /// Record the content-box size of each size query container after layout
     /// (`Node::container_size`) and restyle the descendants of those whose size changed
@@ -115,6 +121,11 @@ impl BaseDocument {
         self.flush_pending_device_changes();
         let scroll_anchors = self.capture_scroll_anchors();
 
+        // Scroll timelines follow the scroll offsets (which may have changed
+        // since the last frame) in the last layout; they are sampled again
+        // after this frame's layout.
+        self.update_scroll_timeline_samples();
+
         // we need to resolve stylist first since it will need to drive our layout bits
         self.resolve_stylist(current_time_for_animations);
         self.sync_content_sized_text_controls();
@@ -150,25 +161,7 @@ impl BaseDocument {
         timer.record_time("layout");
         self.nodes.bump_geometry_generation();
 
-        // Container queries evaluate against their container's size in the last layout:
-        // when a query container's size changed, its descendants are restyled and the
-        // document is laid out again. A size container's size does not depend on its
-        // contents, so this settles in as many passes as containers are nested.
-        for _ in 0..MAX_CONTAINER_QUERY_PASSES {
-            if !self.update_container_sizes() {
-                break;
-            }
-            self.resolve_stylist(current_time_for_animations);
-            if !self.incremental_layout {
-                self.mark_all_damaged();
-            }
-            self.propagate_damage_flags(root_node_id);
-            self.resolve_layout_children();
-            self.resolve_deferred_tasks();
-            self.flush_pending_style_images();
-            self.resolve_layout();
-            self.nodes.bump_geometry_generation();
-        }
+        self.resolve_container_queries(current_time_for_animations, root_node_id);
         timer.record_time("containers");
 
         // Resolve transforms
@@ -176,6 +169,26 @@ impl BaseDocument {
         self.apply_scroll_anchors(scroll_anchors);
         self.clamp_scroll_offsets();
         timer.record_time("transform");
+
+        // Scroll timelines sample their scrollers' offsets and ranges in this
+        // layout (whose scrollable overflow `resolve_transforms` computed):
+        // when a sample changed, the animations it drives are restyled and
+        // the document laid out again.
+        let mut timelines_settled = false;
+        for _ in 0..MAX_SCROLL_TIMELINE_PASSES {
+            if !self.update_scroll_timeline_samples() {
+                timelines_settled = true;
+                break;
+            }
+            self.restyle_and_relayout(current_time_for_animations, root_node_id);
+            self.resolve_container_queries(current_time_for_animations, root_node_id);
+            self.resolve_transforms(root_node_id);
+            self.clamp_scroll_offsets();
+        }
+        if !timelines_settled {
+            self.shell_provider.request_redraw();
+        }
+        timer.record_time("timelines");
 
         // Build paint children / stacking contexts for damaged subtrees. Runs
         // after layout and transforms so that stacking-context roots created by
@@ -226,6 +239,38 @@ impl BaseDocument {
         timer.record_time("subdocs");
 
         timer.print_times(&format!("Resolve({}): ", self.id()));
+    }
+
+    /// Restyle the tree and lay it out again (after the first pass of a
+    /// resolve).
+    fn restyle_and_relayout(&mut self, current_time_for_animations: f64, root_node_id: NodeId) {
+        self.resolve_stylist(current_time_for_animations);
+        if !self.incremental_layout {
+            self.mark_all_damaged();
+        }
+        self.propagate_damage_flags(root_node_id);
+        self.resolve_layout_children();
+        self.resolve_deferred_tasks();
+        self.flush_pending_style_images();
+        self.resolve_layout();
+        self.nodes.bump_geometry_generation();
+    }
+
+    /// Container queries evaluate against their container's size in the last layout:
+    /// when a query container's size changed, its descendants are restyled and the
+    /// document is laid out again. A size container's size does not depend on its
+    /// contents, so this settles in as many passes as containers are nested.
+    fn resolve_container_queries(
+        &mut self,
+        current_time_for_animations: f64,
+        root_node_id: NodeId,
+    ) {
+        for _ in 0..MAX_CONTAINER_QUERY_PASSES {
+            if !self.update_container_sizes() {
+                break;
+            }
+            self.restyle_and_relayout(current_time_for_animations, root_node_id);
+        }
     }
 
     fn resolve_transforms(&mut self, node_id: NodeId) -> Rect {

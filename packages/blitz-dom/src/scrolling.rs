@@ -622,7 +622,7 @@ impl BaseDocument {
         }
     }
 
-    fn scrolls_leftwards(&self, target: ScrollTarget) -> bool {
+    pub(crate) fn scrolls_leftwards(&self, target: ScrollTarget) -> bool {
         let node = match target {
             ScrollTarget::Node(id) => self.nodes.get(id),
             ScrollTarget::Viewport => self.try_root_element(),
