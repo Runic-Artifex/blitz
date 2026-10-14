@@ -380,3 +380,12 @@ fn transitions_started_together_are_marked_unordered() {
         vec![("opacity".to_string(), false), ("width".to_string(), false)]
     );
 }
+
+#[test]
+fn elapsed_times_are_whole_microseconds() {
+    // Stylo holds 40 ms as 0.03999999910593033 s; Chromium reports 0.04.
+    let (mut d, _) = doc(&[("", "animation: k 100ms linear -40ms")]);
+    d.resolve(0.0);
+    let events = d.take_animation_events(0.0);
+    assert_eq!(events[0].elapsed_time, 0.04);
+}

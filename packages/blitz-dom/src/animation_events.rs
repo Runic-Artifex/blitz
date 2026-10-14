@@ -290,6 +290,12 @@ pub(crate) struct AnimationEventTracker {
     queued: Vec<AnimationEvent>,
 }
 
+/// `elapsedTime` as Chromium computes it, from whole microseconds (Stylo
+/// holds durations as single-precision seconds: 0.04 s is 0.03999999910593033).
+fn whole_microseconds(seconds: f64) -> f64 {
+    (seconds * 1e6).round() / 1e6
+}
+
 fn pseudo_name(key: &AnimationSetKey) -> &'static str {
     match &key.pseudo_element {
         None => "",
@@ -360,7 +366,7 @@ impl BaseDocument {
                     node: NodeId::from_u64(record.key.node.id() as u64),
                     pseudo_element: pseudo_name(&record.key),
                     name: record.name(),
-                    elapsed_time,
+                    elapsed_time: whole_microseconds(elapsed_time),
                     unordered,
                 });
             }
@@ -493,7 +499,7 @@ impl BaseDocument {
                     node: NodeId::from_u64(record.key.node.id() as u64),
                     pseudo_element: pseudo_name(&record.key),
                     name: record.name(),
-                    elapsed_time: record.cancel_time(now),
+                    elapsed_time: whole_microseconds(record.cancel_time(now)),
                     unordered: false,
                 });
             }
