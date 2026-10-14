@@ -132,6 +132,11 @@ impl crate::document::BaseDocument {
             self.nodes[node_id].set_restyle_hint(RestyleHint::RESTYLE_SELF);
 
             for animation in set.animations.iter_mut() {
+                // Scroll-driven animations follow their timeline sample
+                // (`update_scroll_timeline_samples`), not time.
+                if !animation.is_time_based() {
+                    continue;
+                }
                 if animation.state == AnimationState::Pending
                     && style::animation::time_in_microseconds(animation.started_at)
                         <= style::animation::time_in_microseconds(now)

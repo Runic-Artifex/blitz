@@ -27,6 +27,12 @@
 //! and `transitionstart` events of transitions an element starts in one style
 //! change by an internal hash table: such events are marked
 //! [`AnimationEvent::unordered`].
+//!
+//! Only animations on the document timeline are recorded. Chromium fires
+//! events for scroll-driven animations by rules of its own (elapsed times in
+//! converted units, a start and an end when scrolled back before the
+//! range) that are not modelled: such animations have no events here, and
+//! [`BaseDocument::scroll_driven_animations`] lets the embedder find them.
 
 use crate::BaseDocument;
 use blitz_traits::node_id::NodeId;
@@ -384,6 +390,9 @@ impl BaseDocument {
         for record in &mut tracker.records {
             record.seen = false;
         }
+        // Animations that are no longer time-based (their timeline changed):
+        // their records are dropped without a cancellation.
+        let mut not_time_based: Vec<(AnimationSetKey, Atom)> = Vec::new();
         {
             let sets = self.animations.sets.read();
             for (key, set) in sets.iter() {
@@ -393,6 +402,10 @@ impl BaseDocument {
                     .unwrap_or_default();
                 for animation in &set.animations {
                     if animation.state == AnimationState::Canceled {
+                        continue;
+                    }
+                    if !animation.is_time_based() {
+                        not_time_based.push((key.clone(), animation.name.clone()));
                         continue;
                     }
                     let (current, iterations) = match animation.iteration_state {
@@ -456,6 +469,12 @@ impl BaseDocument {
                 }
             }
         }
+        tracker.records.retain(|record| match &record.ident {
+            Ident::Animation(name) => !not_time_based
+                .iter()
+                .any(|(key, n)| *key == record.key && n == name),
+            Ident::Transition(..) => true,
+        });
         // Gone: a transition Stylo dropped at its end (its element still in
         // the document) waits for the next frame's sample; anything else was
         // cancelled now.
