@@ -297,6 +297,14 @@ pub trait Document: Any + 'static {
         false
     }
 
+    /// The start of a rendering frame: the shell calls it when it redraws,
+    /// before it resolves styles and layout and paints. An embedder runs the
+    /// steps of HTML's "update the rendering" that come before style and
+    /// layout here (updating animations and dispatching their events, then
+    /// animation frame callbacks), so that they precede the frame's
+    /// rendering as in browsers.
+    fn update_rendering(&mut self) {}
+
     /// Get the [`Document`]'s id
     fn id(&self) -> usize {
         self.inner().id

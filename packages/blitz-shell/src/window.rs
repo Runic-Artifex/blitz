@@ -400,6 +400,9 @@ impl<Rend: WindowRenderer> View<Rend> {
     pub fn redraw(&mut self) {
         #[cfg(target_os = "ios")]
         self.ios_request_redraw.set(false);
+        // The embedder's steps of the frame that precede its rendering
+        // (animation events, animation frame callbacks).
+        self.doc.update_rendering();
         let animation_time = self.current_animation_time();
         let is_visible = self.is_visible;
 
