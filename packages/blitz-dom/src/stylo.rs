@@ -132,7 +132,10 @@ impl crate::document::BaseDocument {
             self.nodes[node_id].set_restyle_hint(RestyleHint::RESTYLE_SELF);
 
             for animation in set.animations.iter_mut() {
-                if animation.state == AnimationState::Pending && animation.started_at <= now {
+                if animation.state == AnimationState::Pending
+                    && style::animation::time_in_microseconds(animation.started_at)
+                        <= style::animation::time_in_microseconds(now)
+                {
                     animation.state = AnimationState::Running;
                 }
                 animation.iterate_if_necessary(now);
@@ -143,7 +146,10 @@ impl crate::document::BaseDocument {
             }
 
             for transition in set.transitions.iter_mut() {
-                if transition.state == AnimationState::Pending && transition.start_time <= now {
+                if transition.state == AnimationState::Pending
+                    && style::animation::time_in_microseconds(transition.start_time)
+                        <= style::animation::time_in_microseconds(now)
+                {
                     transition.state = AnimationState::Running;
                 }
                 if transition.state == AnimationState::Running && transition.has_ended(now) {
