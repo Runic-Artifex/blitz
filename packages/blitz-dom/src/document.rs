@@ -420,6 +420,9 @@ pub struct BaseDocument {
     /// The Stylo engine
     pub(crate) stylist: Stylist,
     pub(crate) animations: DocumentAnimationSet,
+    /// Animation and transition events, when the embedder records them
+    /// (`track_animation_events`).
+    pub(crate) animation_events: Option<crate::animation_events::AnimationEventTracker>,
     /// Stylo shared lock
     pub(crate) guard: SharedRwLock,
     /// Stylo invalidation map. We insert into this map prior to mutating nodes.
@@ -646,6 +649,7 @@ impl BaseDocument {
             root_node_id: NodeId::default(),
             stylist,
             animations: DocumentAnimationSet::default(),
+            animation_events: None,
             snapshots,
             nodes_to_id,
             viewport,

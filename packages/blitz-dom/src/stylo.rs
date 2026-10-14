@@ -194,6 +194,14 @@ impl crate::document::BaseDocument {
         }
         self.snapshots.clear();
 
+        // Elements under a `display: none` ancestor are not restyled: their
+        // animations are cancelled here, as Chromium cancels them.
+        self.cancel_undisplayed_animations();
+        if let Some(mut tracker) = self.animation_events.take() {
+            self.observe_animation_events(&mut tracker, now);
+            self.animation_events = Some(tracker);
+        }
+
         let mut sets = self.animations.sets.write();
         for set in sets.values_mut() {
             set.clear_canceled_animations();

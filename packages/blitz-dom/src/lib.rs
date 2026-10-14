@@ -31,9 +31,12 @@
 pub const DEFAULT_CSS: &str = include_str!("../assets/default.css");
 pub const BULLET_FONT: &[u8] = include_bytes!("../assets/moz-bullet-font.otf");
 
+#[cfg(test)]
+mod animation_event_tests;
 /// The DOM implementation.
 ///
 /// This is the primary entry point for this crate.
+mod animation_events;
 mod document;
 
 /// The nodes themsleves, and their data.
@@ -98,6 +101,7 @@ pub use crate::node::Widget;
 pub use blitz_traits::node_id::NodeId;
 // Re-export taffy: it is part of blitz-dom's public API (e.g. `Node::style`,
 // `Node::final_layout`)
+pub use animation_events::{AnimationEvent, AnimationEventKind};
 pub use config::{DocumentConfig, StyleThreading};
 pub use document::{
     AnimationPhase, AnimationSnapshot, BaseDocument, BoundingRect, DocGuard, DocGuardMut, Document,
